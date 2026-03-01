@@ -11,8 +11,8 @@ public sealed class MetricsHub : IDisposable
 {
     private const int HistoryCap = 3600; // 1 h
 
-    private readonly DateTime _startUtc = DateTime.UtcNow;
-    private readonly Timer    _sampleTimer;
+    private readonly DateTime              _startUtc = DateTime.UtcNow;
+    private readonly System.Threading.Timer _sampleTimer;
 
     // ── Counters (updated by multiple threads) ────────────────────────────────
     private int    _wsClients;
@@ -47,7 +47,7 @@ public sealed class MetricsHub : IDisposable
 
     public MetricsHub()
     {
-        _sampleTimer = new Timer(TakeSample, null,
+        _sampleTimer = new System.Threading.Timer(TakeSample, null,
             TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
     }
 
