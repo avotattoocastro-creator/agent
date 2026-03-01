@@ -674,6 +674,45 @@ app.MapGet("/api/reference/setup/read", async (
     return Results.Ok(new { ok = true, fileName = file, setupText = text });
 });
 
+// ── GET /api/reference/setup/params?car=...&track=...&file=... ───────────────
+app.MapGet("/api/reference/setup/params", async (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    LogBuffer logBuf,
+    [FromQuery] string? car,
+    [FromQuery] string? track,
+    [FromQuery] string? file) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    if (string.IsNullOrWhiteSpace(car)  || !IsValidRefSegment(car))
+        return Results.BadRequest(new { error = "Valid car parameter is required." });
+    if (string.IsNullOrWhiteSpace(track) || !IsValidRefSegment(track))
+        return Results.BadRequest(new { error = "Valid track parameter is required." });
+    if (string.IsNullOrWhiteSpace(file)  || !IsValidRefIniFile(file))
+        return Results.BadRequest(new { error = "Valid .ini file name is required." });
+
+    var root = cfgSvc.Current.Setup.ReferenceRoot;
+    if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+        return Results.BadRequest(new { error = "ReferenceRoot is not configured." });
+
+    var absPath = SafeRefPath(root, car, track, file);
+    if (absPath is null || !File.Exists(absPath))
+        return Results.NotFound(new { error = "Setup file not found." });
+
+    var text     = await File.ReadAllTextAsync(absPath);
+    var sections = ParseIniSections(text);
+    var keys     = sections
+        .Where(s => s.Key != string.Empty)
+        .SelectMany(s => { var sectionKey = s.Key; return s.Value.Keys.Select(k => $"[{sectionKey}]{k}"); })
+        .OrderBy(k => k)
+        .ToList();
+
+    logBuf.Add(LogLevel.Information, "WebUI",
+        $"SETUP PARAMS: file={file} count={keys.Count}");
+
+    return Results.Ok(new { count = keys.Count, keys });
+});
+
 // ── POST /api/reference/setup/apply ──────────────────────────────────────────
 app.MapPost("/api/reference/setup/apply", async (
     HttpContext ctx,
@@ -710,6 +749,26 @@ app.MapPost("/api/reference/setup/apply", async (
 
     logBuf.Add(LogLevel.Information, "WebUI",
         $"APPLY: received {req.Changes.Count} changes. No AI generation triggered.");
+
+    // ── Allowlist enforcement ─────────────────────────────────────────────────
+    if (req.Allowlist is { Count: > 0 })
+    {
+        logBuf.Add(LogLevel.Information, "WebUI",
+            $"AI ALLOWLIST: received {req.Allowlist.Count} keys (constraining proposal generator)");
+
+        // Case-insensitive: INI section/key names are conventionally case-insensitive.
+        var allowSet = new HashSet<string>(req.Allowlist, StringComparer.OrdinalIgnoreCase);
+        var disallowed = req.Changes
+            .Where(c => !allowSet.Contains($"[{c.Section}]{c.Key}"))
+            .Select(c => $"[{c.Section}]{c.Key}")
+            .ToList();
+        if (disallowed.Count > 0)
+            return Results.BadRequest(new
+            {
+                error  = "Parameter not found in setup",
+                keys   = disallowed
+            });
+    }
 
     // ── Determine live-apply eligibility (informational, save is never blocked) ─
     string? liveApplyReason = null;
@@ -1373,7 +1432,8 @@ record ApplySetupRequestDto(
     string?                    BaseFile,
     List<ApplySetupChangeDto>? Changes,
     bool                       CreateVersionedCopy = false,
-    string?                    Reason              = null);
+    string?                    Reason              = null,
+    List<string>?              Allowlist           = null);
 
 record SetupSaveMetadata(
     string                    BaseFile,
