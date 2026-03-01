@@ -31,21 +31,22 @@ builder.Logging.AddProvider(logBuffer);
 
 // ── Services ──────────────────────────────────────────────────────────────
 builder.Services.AddSingleton(logBuffer);
-builder.Services.AddSingleton<AgentConfigService>();
+var configSvc = new AgentConfigService(builder.Configuration);
+builder.Services.AddSingleton(configSvc);
 builder.Services.AddSingleton<MetricsHub>();
 builder.Services.AddSingleton<AcSharedMemoryReader>();
 builder.Services.AddSingleton<WebSocketHub>();
 builder.Services.AddSingleton<TelemetryService>();
 builder.Services.AddSingleton<WindowsAutostartService>();
-builder.Services.AddHostedService<AgentRuntime>();
+builder.Services.AddSingleton<AgentRuntime>();
+builder.Services.AddSingleton<AcProcessMonitor>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<AgentRuntime>());
 builder.Services.AddHostedService<WatchdogService>();
-builder.Services.AddHostedService<AcProcessMonitor>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<AcProcessMonitor>());
 builder.Services.AddHostedService<LanDiscoveryService>();
 
 // ── Kestrel ───────────────────────────────────────────────────────────────
-var preConfig = new AgentConfig();
-builder.Configuration.GetSection("AvoAgent").Bind(preConfig);
-builder.WebHost.UseUrls($"http://0.0.0.0:{preConfig.Port}");
+builder.WebHost.UseUrls($"http://0.0.0.0:{configSvc.Current.Port}");
 
 var app = builder.Build();
 
