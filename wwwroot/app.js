@@ -11,6 +11,30 @@ let configCache = null;
 function getToken() { return localStorage.getItem('avo_token') || ''; }
 function setToken(t) { localStorage.setItem('avo_token', t); }
 
+// ── Querystring bootstrap ─────────────────────────────────────────────────────
+// Read non-empty querystring params and use them as overrides.
+// This lets a caller link to the dashboard pre-configured without forcing
+// empty values to overwrite what is already stored.
+(function applyQueryStringOverrides() {
+  const p = new URLSearchParams(window.location.search);
+  const qs = (k) => { const v = p.get(k); return (v !== null && v.trim() !== '') ? v.trim() : null; };
+  const qsToken = qs('Token') || qs('token');
+  if (qsToken) {
+    setToken(qsToken);
+    // Remove from URL so the token is not visible in history/logs.
+    const clean = new URL(window.location.href);
+    clean.searchParams.delete('Token'); clean.searchParams.delete('token');
+    history.replaceState(null, '', clean.toString());
+  }
+  // Store numeric overrides in sessionStorage so loadConfig can pick them up.
+  ['Port','PhysicsHz','GraphicsHz','StaticHz'].forEach(k => {
+    const v = qs(k);
+    if (v && !isNaN(Number(v))) sessionStorage.setItem('avo_qs_' + k.toLowerCase(), v);
+  });
+  const root = qs('Setup.DefaultRoot');
+  if (root) sessionStorage.setItem('avo_qs_setuproot', root);
+})();
+
 const inpToken = document.getElementById('inp-token');
 inpToken.value = getToken();
 inpToken.addEventListener('change', () => { setToken(inpToken.value.trim()); });
@@ -226,26 +250,66 @@ async function loadConfig() {
   }
   hideAuthWarning();
   configCache = c;
-  document.getElementById('cfg-token').value    = c.token    || '';
-  document.getElementById('cfg-port').value     = c.port     || 8181;
-  document.getElementById('cfg-physhz').value   = c.physicsHz  || 60;
-  document.getElementById('cfg-gfxhz').value    = c.graphicsHz || 20;
-  document.getElementById('cfg-statichz').value = c.staticHz   || 1;
-  document.getElementById('cfg-setuproot').value = c.setup?.defaultRoot || '';
+
+  // Token: server never returns the value; we read it from localStorage.
+  // If a token is stored locally, show it in the config field so the user
+  // can inspect/change it. The tokenConfigured flag tells us whether the
+  // server has a token set at all.
+  const storedToken = getToken();
+  document.getElementById('cfg-token').value = storedToken;
+  const tBadge = document.getElementById('cfg-token-status');
+  if (tBadge) {
+    tBadge.textContent = c.tokenConfigured ? '✓ configured' : '⚠ default';
+    tBadge.className   = 'badge-pill ' + (c.tokenConfigured ? 'badge-on' : 'badge-warn');
+  }
+
+  // Numeric/string config — prefer querystring overrides stored in sessionStorage.
+  const qPort  = sessionStorage.getItem('avo_qs_port');
+  const qPhys  = sessionStorage.getItem('avo_qs_physicshz');
+  const qGfx   = sessionStorage.getItem('avo_qs_graphicshz');
+  const qStatic= sessionStorage.getItem('avo_qs_statichz');
+  const qRoot  = sessionStorage.getItem('avo_qs_setuproot');
+
+  document.getElementById('cfg-port').value     = qPort   ?? c.port     ?? 8181;
+  document.getElementById('cfg-physhz').value   = qPhys   ?? c.physicsHz  ?? 60;
+  document.getElementById('cfg-gfxhz').value    = qGfx    ?? c.graphicsHz ?? 20;
+  document.getElementById('cfg-statichz').value = qStatic ?? c.staticHz   ?? 1;
+  document.getElementById('cfg-setuproot').value = qRoot  ?? c.setup?.defaultRoot ?? '';
+
+  const hasQsOverride = qPort || qPhys || qGfx || qStatic || qRoot;
+  remoteLog('WebUI: Loaded config from server' + (hasQsOverride ? ' (querystring overrides applied)' : ''));
 }
 
 async function saveConfig(e) {
   e.preventDefault();
   const msg = document.getElementById('cfg-msg');
+
+  // Guard: if no token is available we cannot authenticate the save request.
+  const newToken = document.getElementById('cfg-token').value.trim();
+  if (!getToken() && !newToken) {
+    msg.textContent = '⚠ Token required — paste your API token in the field above first.';
+    msg.className = 'cfg-msg warn';
+    setTimeout(() => { msg.textContent = ''; }, 6000);
+    remoteLog('WebUI: Save config blocked — no token available');
+    return;
+  }
+
+  // If the token field is filled, update localStorage so subsequent API calls use it.
+  if (newToken) {
+    const prev = getToken();
+    if (newToken !== prev) { setToken(newToken); inpToken.value = newToken; }
+  }
+
   const body = {
     ...(configCache || {}),
-    token:      document.getElementById('cfg-token').value,
+    // Only include token if the user typed one; otherwise leave it blank so
+    // the server preserves the existing token.
+    token:      newToken || undefined,
     port:       +document.getElementById('cfg-port').value,
     physicsHz:  +document.getElementById('cfg-physhz').value,
     graphicsHz: +document.getElementById('cfg-gfxhz').value,
     staticHz:   +document.getElementById('cfg-statichz').value,
     setup: {
-      // Explicitly carry forward fields that are managed by other UI controls.
       referenceRoot:    configCache?.setup?.referenceRoot    || '',
       allowBrowseDialog: configCache?.setup?.allowBrowseDialog ?? true,
       defaultRoot:      document.getElementById('cfg-setuproot').value,
@@ -256,18 +320,17 @@ async function saveConfig(e) {
   if (r._error) {
     msg.textContent = '✗ ' + (r._error || 'Save failed');
     msg.className = 'cfg-msg err';
+    remoteLog('WebUI: Save config FAIL — ' + (r._error || r._status));
   } else if (check.restartRequired) {
     msg.textContent = '⚠ Saved – restart required for: ' + (check.fields || []).join(', ');
     msg.className = 'cfg-msg warn';
-    const prevToken1 = configCache?.token;
     configCache = body;
-    syncTokenIfChanged(body.token, prevToken1);
+    remoteLog('WebUI: Saved config OK (restart required)');
   } else {
     msg.textContent = '✓ Saved';
     msg.className = 'cfg-msg ok';
-    const prevToken2 = configCache?.token;
     configCache = body;
-    syncTokenIfChanged(body.token, prevToken2);
+    remoteLog('WebUI: Saved config OK');
   }
   setTimeout(() => { msg.textContent = ''; }, 5000);
 }

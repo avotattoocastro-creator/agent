@@ -136,8 +136,9 @@
         <div class="form-grid">
           <label>Token
             <div class="inp-row">
-              <input id="cfg-token" type="password" name="Token">
+              <input id="cfg-token" type="password" name="Token" placeholder="enter new token to change…">
               <button type="button" class="btn-icon" onclick="togglePwd('cfg-token')">👁</button>
+              <span id="cfg-token-status" class="badge-pill badge-off" style="margin-left:4px;font-size:11px"></span>
             </div>
           </label>
           <label>HTTP Port <input id="cfg-port" type="number" name="Port" min="1" max="65535"></label>
