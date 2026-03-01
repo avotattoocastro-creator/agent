@@ -11,9 +11,6 @@ using AvoTelemetryAgent.SharedMemory;
 using AvoTelemetryAgent.UI;
 using Microsoft.AspNetCore.Mvc;
 
-// ── Log buffer (created before DI so the provider can be registered) ─────────
-var logBuffer = new LogBuffer();
-
 var builder = WebApplication.CreateBuilder(args);
 
 // ── Command-line overrides ─────────────────────────────────────────────────
@@ -28,11 +25,11 @@ for (int i = 0; i < args.Length; i++)
     }
 }
 
-// ── Logging ───────────────────────────────────────────────────────────────
-builder.Logging.AddProvider(logBuffer);
-
 // ── Services ──────────────────────────────────────────────────────────────
-builder.Services.AddSingleton(logBuffer);
+// Register LogBuffer as a DI singleton first; then expose the SAME instance
+// as ILoggerProvider so ASP.NET Core's LoggerFactory captures all ILogger calls.
+builder.Services.AddSingleton<LogBuffer>();
+builder.Services.AddSingleton<ILoggerProvider>(sp => sp.GetRequiredService<LogBuffer>());
 var configSvc = new AgentConfigService(builder.Configuration);
 builder.Services.AddSingleton(configSvc);
 builder.Services.AddSingleton<MetricsHub>();
@@ -122,6 +119,7 @@ app.Map("/ws/logs", async (HttpContext ctx, LogWebSocketStreamer logs, AgentConf
     }
     var tail = int.TryParse(ctx.Request.Query["tail"], out var t) ? Math.Clamp(t, 0, 2000) : 200;
     using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
+    app.Logger.LogInformation("WS/LOGS CONNECTED");
     await logs.HandleAsync(ws, ctx.RequestAborted, tail);
 });
 
@@ -688,6 +686,7 @@ app.MapPost("/api/setups/save", async (
 app.Lifetime.ApplicationStarted.Register(() =>
 {
     var cfg = app.Services.GetRequiredService<AgentConfigService>().Current;
+    app.Logger.LogInformation("Agent started on port {Port}", cfg.Port);
     Console.ForegroundColor = ConsoleColor.Cyan;
     Console.WriteLine();
     Console.WriteLine("╔══════════════════════════════════════╗");
