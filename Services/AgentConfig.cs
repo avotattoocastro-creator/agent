@@ -17,7 +17,9 @@ public sealed class AgentConfig
 
 public sealed class SetupSection
 {
-    public string DefaultRoot { get; set; } = string.Empty;
+    public string DefaultRoot      { get; set; } = string.Empty;
+    public string ReferenceRoot    { get; set; } = string.Empty;
+    public bool   AllowBrowseDialog { get; set; } = true;
 }
 
 public sealed class DiscoverySection
