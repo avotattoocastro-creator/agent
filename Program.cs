@@ -725,13 +725,17 @@ static bool IsValidRefSegment(string? s)
 
 /// <summary>
 /// Returns true when the file name is a valid setup file.
-/// Base name must match [A-Za-z0-9 _-] and the extension must be .ini.
+/// Base name must match [A-Za-z0-9 _-] and the extension must be .ini or .json.
 /// </summary>
 static bool IsValidRefIniFile(string? s)
 {
     if (string.IsNullOrWhiteSpace(s)) return false;
-    if (!s.EndsWith(".ini", StringComparison.OrdinalIgnoreCase)) return false;
-    var baseName = s[..^4];
+    // Determine accepted extension (.ini or .json)
+    int extLen;
+    if      (s.EndsWith(".ini",  StringComparison.OrdinalIgnoreCase)) extLen = ".ini".Length;
+    else if (s.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) extLen = ".json".Length;
+    else return false;
+    var baseName = s[..^extLen];
     if (baseName.Length == 0) return false;
     foreach (var c in baseName)
         if (!char.IsLetterOrDigit(c) && c != ' ' && c != '_' && c != '-')

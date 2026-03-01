@@ -133,10 +133,13 @@ public sealed class SetupReferenceService
                     var trackId = Path.GetFileName(trackDir);
                     if (string.IsNullOrEmpty(trackId)) continue;
 
+                    var allFiles = Directory.EnumerateFiles(
+                        trackDir, "*", SearchOption.TopDirectoryOnly);
+
                     var setups = new List<SetupRefItem>();
-                    foreach (var iniFile in Directory.EnumerateFiles(trackDir, "*.ini"))
+                    foreach (var f in allFiles.Where(IsAllowedSetupFile))
                     {
-                        var fi = new FileInfo(iniFile);
+                        var fi = new FileInfo(f);
                         setups.Add(new SetupRefItem
                         {
                             CarId        = carId,
@@ -148,6 +151,19 @@ public sealed class SetupReferenceService
                             SizeBytes    = fi.Length,
                         });
                     }
+
+                    if (setups.Count == 0)
+                    {
+                        var allForLog = Directory.EnumerateFiles(
+                            trackDir, "*", SearchOption.TopDirectoryOnly);
+                        _log.LogDebug(
+                            "Reference setups: 0 matches in {TrackDir} (exists={Exists}). " +
+                            "First 50 files: [{Files}]",
+                            trackDir,
+                            Directory.Exists(trackDir),
+                            string.Join(", ", allForLog.Take(50).Select(Path.GetFileName)));
+                    }
+
                     if (setups.Count > 0) trackTree[trackId] = setups;
                 }
 
@@ -160,6 +176,28 @@ public sealed class SetupReferenceService
         }
 
         return tree;
+    }
+
+    /// <summary>
+    /// Returns true for setup files that should be surfaced to clients.
+    /// Accepts .ini and .json; rejects backup/temporary variants and filenames
+    /// containing the tilde character (~).
+    /// </summary>
+    private static bool IsAllowedSetupFile(string path)
+    {
+        var name = Path.GetFileName(path);
+        var ext  = Path.GetExtension(path);
+        if (string.IsNullOrWhiteSpace(ext)) return false;
+        ext = ext.ToLowerInvariant();
+        // Must be an accepted setup extension first.
+        if (ext is not (".ini" or ".json")) return false;
+        // Reject temporary/editor artefacts containing a tilde.
+        if (name.Contains('~')) return false;
+        // Reject compound backup extensions: *.ini.bak, *.json.bak, *.ini.tmp, *.json.tmp …
+        foreach (var suffix in new[] { ".bak", ".tmp", ".old", ".backup" })
+            if (name.EndsWith(ext + suffix, StringComparison.OrdinalIgnoreCase))
+                return false;
+        return true;
     }
 
     private sealed record CachedTree(
