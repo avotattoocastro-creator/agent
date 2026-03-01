@@ -279,8 +279,25 @@ app.MapPost("/api/admin/stop", async (HttpContext ctx, AgentConfigService cfgSvc
 // ── GET /api/admin/config ─────────────────────────────────────────────────
 app.MapGet("/api/admin/config", (HttpContext ctx, AgentConfigService cfgSvc) =>
 {
-    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
-    return Results.Ok(cfgSvc.Current);
+    // Allow unauthenticated reads from localhost so the dashboard can bootstrap
+    // itself even before the user has pasted their token — but only when the
+    // admin has explicitly restricted the UI to localhost (BindLocalhostOnly).
+    if (!TokenOk(ctx, cfgSvc) && !(cfgSvc.Current.AdminUi.BindLocalhostOnly && IsLocalOrSelf(ctx)))
+        return Results.Unauthorized();
+    var c = cfgSvc.Current;
+    return Results.Ok(new
+    {
+        // token is NEVER returned in full — only a flag so the UI can indicate status
+        tokenConfigured = !string.IsNullOrWhiteSpace(c.Token) && c.Token != AgentConfig.DefaultToken,
+        port            = c.Port,
+        physicsHz       = c.PhysicsHz,
+        graphicsHz      = c.GraphicsHz,
+        staticHz        = c.StaticHz,
+        setup           = c.Setup,
+        discovery       = c.Discovery,
+        adminUi         = c.AdminUi,
+        agent           = c.Agent,
+    });
 });
 
 // ── POST /api/admin/config ────────────────────────────────────────────────
@@ -290,6 +307,10 @@ app.MapPost("/api/admin/config", async (
     [FromBody] AgentConfig body) =>
 {
     if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    // Never overwrite the token with an empty value (e.g. when the dashboard
+    // omits the token field because it is not shown in plain text).
+    if (string.IsNullOrWhiteSpace(body.Token))
+        body.Token = cfgSvc.Current.Token;
     await cfgSvc.SaveAsync(body);
     return Results.Ok(new { ok = true });
 });
@@ -411,7 +432,7 @@ app.MapPost("/api/admin/diagnostics/run", (
         setupFolder           = setupRoot,
         setupFolderExists     = setupExists,
         setupFolderWritable   = setupWritable,
-        tokenConfigured       = cfgSvc.Current.Token != "12345",
+        tokenConfigured       = !string.IsNullOrWhiteSpace(cfgSvc.Current.Token) && cfgSvc.Current.Token != AgentConfig.DefaultToken,
         machineName           = Environment.MachineName,
         localIps,
         httpPort              = cfgSvc.Current.Port,

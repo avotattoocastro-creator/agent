@@ -3,8 +3,11 @@ namespace AvoTelemetryAgent.Services;
 /// <summary>Full runtime configuration. Persisted to Documents/AvoTelemetryAgent/agent.config.json.</summary>
 public sealed class AgentConfig
 {
+    /// <summary>Default token value that ships with a fresh install and signals the user must change it.</summary>
+    public const string DefaultToken = "change-me";
+
     public int    Port       { get; set; } = 8181;
-    public string Token      { get; set; } = "change-me";
+    public string Token      { get; set; } = DefaultToken;
     public int    PhysicsHz  { get; set; } = 60;
     public int    GraphicsHz { get; set; } = 20;
     public int    StaticHz   { get; set; } = 1;
