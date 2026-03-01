@@ -38,14 +38,10 @@ builder.Services.AddSingleton<AcSharedMemoryReader>();
 builder.Services.AddSingleton<WebSocketHub>();
 builder.Services.AddSingleton<TelemetryService>();
 builder.Services.AddSingleton<WindowsAutostartService>();
-<<<<<<< HEAD
 builder.Services.AddSingleton<AgentRuntime>();
 builder.Services.AddSingleton<AcProcessMonitor>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<AgentRuntime>());
-=======
 builder.Services.AddSingleton<SetupReferenceService>();
-builder.Services.AddHostedService<AgentRuntime>();
->>>>>>> 2ee9e762810c499369ca153d32a97e13c790ffd1
+builder.Services.AddHostedService(sp => sp.GetRequiredService<AgentRuntime>());
 builder.Services.AddHostedService<WatchdogService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<AcProcessMonitor>());
 builder.Services.AddHostedService<LanDiscoveryService>();
