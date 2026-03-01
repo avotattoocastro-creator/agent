@@ -708,6 +708,9 @@ app.MapPost("/api/reference/setup/apply", async (
     if (req.Changes is null || req.Changes.Count == 0)
         return Results.BadRequest(new { error = "At least one change is required." });
 
+    logBuf.Add(LogLevel.Information, "WebUI",
+        $"APPLY: received {req.Changes.Count} changes. No AI generation triggered.");
+
     // ── Determine live-apply eligibility (informational, save is never blocked) ─
     string? liveApplyReason = null;
     if (!monitor.AcProcessRunning)
