@@ -29,7 +29,17 @@ async function api(method, path, body) {
   try {
     const r = await fetch(BASE + path, opts);
     if (r.status === 204) return {};
-    return r.ok ? await r.json() : { _error: await r.text(), _status: r.status };
+    if (!r.ok) {
+      const errText = await r.text();
+      if ((r.status === 401 || r.status === 403) && Date.now() - _authToastAt > 8000) {
+        _authToastAt = Date.now();
+        toast(r.status === 401
+          ? 'Unauthorized (401) — check token.'
+          : 'Forbidden (403) — admin endpoints require localhost access.');
+      }
+      return { _error: errText, _status: r.status };
+    }
+    return await r.json();
   } catch (e) {
     return { _error: e.message };
   }
@@ -37,11 +47,30 @@ async function api(method, path, body) {
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
 let toastTimeout;
+let _authToastAt = 0;
 function toast(msg) {
   const el = document.getElementById('toast');
   el.textContent = msg; el.classList.add('show');
   clearTimeout(toastTimeout);
   toastTimeout = setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+function showAuthWarning(msg) {
+  let el = document.getElementById('auth-warning');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'auth-warning';
+    el.style.cssText =
+      'background:#7c2d12;color:#fef2f2;padding:10px 20px;font-size:13px;' +
+      'text-align:center;border-bottom:1px solid #991b1b;';
+    document.querySelector('main').prepend(el);
+  }
+  el.textContent = msg;
+  el.style.display = '';
+}
+function hideAuthWarning() {
+  const el = document.getElementById('auth-warning');
+  if (el) el.style.display = 'none';
 }
 
 // ── Mini chart ───────────────────────────────────────────────────────────────
@@ -188,7 +217,14 @@ async function ctrlStop() {
 // ── Config ────────────────────────────────────────────────────────────────────
 async function loadConfig() {
   const c = await api('GET', '/api/admin/config');
-  if (c._error) return;
+  if (c._error) {
+    if (c._status === 401) {
+      toast('Unauthorized (401). Set API token at top and reload.');
+      showAuthWarning('⚠ Unauthorized — paste your API token in the Token field above and reload the page.');
+    }
+    return;
+  }
+  hideAuthWarning();
   configCache = c;
   document.getElementById('cfg-token').value    = c.token    || '';
   document.getElementById('cfg-port').value     = c.port     || 8181;
@@ -223,13 +259,25 @@ async function saveConfig(e) {
   } else if (check.restartRequired) {
     msg.textContent = '⚠ Saved – restart required for: ' + (check.fields || []).join(', ');
     msg.className = 'cfg-msg warn';
+    const prevToken1 = configCache?.token;
     configCache = body;
+    syncTokenIfChanged(body.token, prevToken1);
   } else {
     msg.textContent = '✓ Saved';
     msg.className = 'cfg-msg ok';
+    const prevToken2 = configCache?.token;
     configCache = body;
+    syncTokenIfChanged(body.token, prevToken2);
   }
   setTimeout(() => { msg.textContent = ''; }, 5000);
+}
+
+function syncTokenIfChanged(newToken, prevToken) {
+  if (newToken && newToken !== prevToken) {
+    setToken(newToken);
+    inpToken.value = newToken;
+    toast('Token updated for this dashboard session');
+  }
 }
 
 async function saveToggle(field, value) {
@@ -400,7 +448,7 @@ async function refBrowse() {
     document.getElementById('inp-refroot').value = r.path;
     toast('Folder selected');
   } else {
-    toast('Browse cancelled');
+    toast(`Folder selection cancelled or blocked. Open dashboard via http://${location.host} on the simulator PC and ensure token is set.`);
   }
 }
 
