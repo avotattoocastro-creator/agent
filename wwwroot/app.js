@@ -386,6 +386,7 @@ function toggleSection(id) {
   const hidden = el.style.display === 'none';
   el.style.display = hidden ? '' : 'none';
   if (id === 'logs-body' && hidden) refreshLogs();
+  if (id === 'setup-ai-body' && hidden) aiLoadCars();
 }
 function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -503,7 +504,7 @@ function onRemoteModeChange() {
   saveRemoteConfig();
   const en = document.getElementById('tog-remote').checked;
   document.getElementById('remote-controls').style.display = en ? '' : 'none';
-  if (en) remoteLoadCars();
+  if (en) { remoteLoadCars(); aiLoadCars(); }
 }
 
 function remoteBase() {
@@ -605,8 +606,243 @@ async function remoteSaveSetup() {
   setTimeout(() => { msg.textContent = ''; }, 5000);
 }
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
-(async function init() {
+// ── Setup AI Workflow ─────────────────────────────────────────────────────────
+const aiState = { car: '', track: '', baseFile: '', baseIni: '', changes: [], nextId: 1 };
+let _wsSocket = null;
+
+function aiShowTab(tabId) {
+  document.querySelectorAll('#card-setup-ai .tab-pane').forEach(el => el.style.display = 'none');
+  document.getElementById(tabId).style.display = '';
+  document.querySelectorAll('#card-setup-ai .tab-btn').forEach(b => b.classList.remove('tab-active'));
+  const btn = [...document.querySelectorAll('#card-setup-ai .tab-btn')]
+    .find(b => b.getAttribute('onclick') === `aiShowTab('${tabId}')`);
+  if (btn) btn.classList.add('tab-active');
+  if (tabId === 'ai-tab-versions') aiLoadVersions();
+  if (tabId === 'ai-tab-logs' && !_wsSocket) wsConnectLogs();
+}
+
+async function aiLoadCars() {
+  const r = await remoteApi('GET', '/api/reference/cars');
+  const sel = document.getElementById('ai-car');
+  sel.innerHTML = '<option value="">— select car —</option>';
+  if (!Array.isArray(r)) return;
+  r.forEach(c => { const o = document.createElement('option'); o.value = o.textContent = c; sel.appendChild(o); });
+}
+
+async function aiLoadTracks() {
+  aiState.car = document.getElementById('ai-car').value;
+  const tSel = document.getElementById('ai-track');
+  const sSel = document.getElementById('ai-setup');
+  tSel.innerHTML = '<option value="">— select track —</option>';
+  sSel.innerHTML = '<option value="">— select setup —</option>';
+  Object.assign(aiState, { track: '', baseFile: '', baseIni: '' });
+  document.getElementById('ai-base-content').value = '';
+  document.getElementById('ai-loaded-badge').textContent = '';
+  if (!aiState.car) return;
+  const r = await remoteApi('GET', `/api/reference/tracks?car=${encodeURIComponent(aiState.car)}`);
+  if (!Array.isArray(r)) return;
+  r.forEach(t => { const o = document.createElement('option'); o.value = o.textContent = t; tSel.appendChild(o); });
+}
+
+async function aiLoadSetups() {
+  aiState.track = document.getElementById('ai-track').value;
+  const sSel = document.getElementById('ai-setup');
+  sSel.innerHTML = '<option value="">— select setup —</option>';
+  Object.assign(aiState, { baseFile: '', baseIni: '' });
+  document.getElementById('ai-base-content').value = '';
+  document.getElementById('ai-loaded-badge').textContent = '';
+  if (!aiState.car || !aiState.track) return;
+  const r = await remoteApi('GET', `/api/reference/setups?car=${encodeURIComponent(aiState.car)}&track=${encodeURIComponent(aiState.track)}`);
+  if (!Array.isArray(r)) return;
+  r.forEach(f => { const o = document.createElement('option'); o.value = o.textContent = f; sSel.appendChild(o); });
+}
+
+async function aiLoadContent() {
+  aiState.baseFile = document.getElementById('ai-setup').value;
+  document.getElementById('ai-base-content').value = '';
+  document.getElementById('ai-loaded-badge').textContent = '';
+  if (!aiState.car || !aiState.track || !aiState.baseFile) { aiUpdateApplyBtn(); return; }
+  const r = await remoteApi('GET', `/api/reference/setup/read?car=${encodeURIComponent(aiState.car)}&track=${encodeURIComponent(aiState.track)}&file=${encodeURIComponent(aiState.baseFile)}`);
+  if (r._error) { remoteLog('AI: Error loading: ' + r._error); return; }
+  aiState.baseIni = r.setupText || '';
+  document.getElementById('ai-base-content').value = aiState.baseIni;
+  document.getElementById('ai-loaded-badge').textContent = `✓ Loaded: ${aiState.baseFile}  (${aiState.baseIni.length} bytes)`;
+  remoteLog(`AI: Loaded base file: ${aiState.baseFile}`);
+  aiUpdateApplyBtn();
+}
+
+function aiAddChange() {
+  const id = aiState.nextId++;
+  aiState.changes.push({ id, section: '', key: '', value: '' });
+  aiRenderChanges();
+}
+function aiRemoveChange(id) {
+  aiState.changes = aiState.changes.filter(c => c.id !== id);
+  aiRenderChanges();
+}
+function aiUpdateChange(id, field, value) {
+  const c = aiState.changes.find(c => c.id === id);
+  if (c) c[field] = value;
+  aiUpdateApplyBtn();
+}
+function aiRenderChanges() {
+  const container = document.getElementById('ai-changes-list');
+  if (!aiState.changes.length) {
+    container.innerHTML = '<div class="muted small">No changes yet — click "+ Add Change" to add key/value patches.</div>';
+    aiUpdateApplyBtn(); return;
+  }
+  container.innerHTML = aiState.changes.map(c => `
+    <div class="ai-change-row" data-id="${c.id}">
+      <input type="text" placeholder="Section" value="${escHtml(c.section)}"
+        oninput="aiUpdateChange(${c.id},'section',this.value)" style="width:120px">
+      <input type="text" placeholder="Key" value="${escHtml(c.key)}"
+        oninput="aiUpdateChange(${c.id},'key',this.value)" style="width:150px">
+      <input type="text" placeholder="Value" value="${escHtml(c.value)}"
+        oninput="aiUpdateChange(${c.id},'value',this.value)" style="flex:1;min-width:80px">
+      <button class="btn-icon" onclick="aiRemoveChange(${c.id})" title="Remove change">✕</button>
+    </div>`).join('');
+  aiUpdateApplyBtn();
+}
+function aiUpdateApplyBtn() {
+  const btn = document.getElementById('btn-ai-apply');
+  if (!btn) return;
+  const hasFile    = !!aiState.baseFile;
+  const hasChanges = aiState.changes.some(c => c.section && c.key);
+  btn.disabled = !(hasFile && hasChanges);
+}
+
+async function aiApply() {
+  const btn    = document.getElementById('btn-ai-apply');
+  const status = document.getElementById('ai-apply-status');
+  btn.disabled = true;
+  status.textContent = '⌛ Applying…'; status.className = 'cfg-msg';
+  const body = {
+    car:                aiState.car,
+    track:              aiState.track,
+    baseFile:           aiState.baseFile,
+    changes:            aiState.changes.filter(c => c.section && c.key)
+                          .map(c => ({ section: c.section, key: c.key, value: c.value })),
+    createVersionedCopy: document.getElementById('ai-versioned').checked,
+    reason:             document.getElementById('ai-reason').value.trim() || 'AI',
+  };
+  const r = await remoteApi('POST', '/api/reference/setup/apply', body);
+  if (r._error || !r.ok) {
+    status.textContent = '✗ ' + (r._error || 'Apply failed'); status.className = 'cfg-msg err';
+    remoteLog('AI: Apply FAILED: ' + (r._error || JSON.stringify(r)));
+    btn.disabled = false; return;
+  }
+  status.textContent = `✓ Saved: ${r.savedFile}`; status.className = 'cfg-msg ok';
+  const badge = document.getElementById('ai-applied-badge');
+  badge.style.display = '';
+  badge.innerHTML = `Applied → <strong>${escHtml(r.savedFile)}</strong><br><span class="muted small">${escHtml(r.path || '')}</span>`;
+  remoteLog(`AI: Applied → ${r.savedFile}`);
+  await aiRefreshSetups(r.savedFile);
+  aiRenderDiff(r.diff);
+  btn.disabled = false;
+  setTimeout(() => { status.textContent = ''; }, 6000);
+}
+
+async function aiRefreshSetups(selectFile) {
+  if (!aiState.car || !aiState.track) return;
+  const sSel = document.getElementById('ai-setup');
+  const r = await remoteApi('GET', `/api/reference/setups?car=${encodeURIComponent(aiState.car)}&track=${encodeURIComponent(aiState.track)}`);
+  if (!Array.isArray(r)) return;
+  sSel.innerHTML = '<option value="">— select setup —</option>';
+  r.forEach(f => {
+    const o = document.createElement('option');
+    o.value = o.textContent = f;
+    if (f === selectFile) o.selected = true;
+    sSel.appendChild(o);
+  });
+  if (selectFile) { aiState.baseFile = selectFile; await aiLoadContent(); }
+}
+
+function aiRenderDiff(diff) {
+  const empty = document.getElementById('ai-diff-empty');
+  const table = document.getElementById('ai-diff-table');
+  const tbody = document.getElementById('ai-diff-tbody');
+  if (!diff || !diff.length) { empty.style.display = ''; table.style.display = 'none'; return; }
+  empty.style.display = 'none';
+  tbody.innerHTML = diff.map(d => `
+    <tr>
+      <td class="mono">${escHtml(d.section || '')}</td>
+      <td class="mono">${escHtml(d.key || '')}</td>
+      <td class="mono diff-old">${escHtml(d.oldValue ?? '—')}</td>
+      <td class="mono diff-new">${escHtml(d.newValue ?? '—')}</td>
+    </tr>`).join('');
+  table.style.display = '';
+  aiShowTab('ai-tab-diff');
+}
+
+async function aiLoadVersions() {
+  const container = document.getElementById('ai-versions-list');
+  if (!aiState.car || !aiState.track || !aiState.baseFile) {
+    container.innerHTML = '<span class="muted small">Select car, track and base setup in the Load tab first.</span>';
+    return;
+  }
+  container.innerHTML = '<span class="muted small">Loading…</span>';
+  const r = await remoteApi('GET',
+    `/api/reference/setup/versions?car=${encodeURIComponent(aiState.car)}&track=${encodeURIComponent(aiState.track)}&baseFile=${encodeURIComponent(aiState.baseFile)}`);
+  if (r._error || !r.ok) {
+    container.innerHTML = `<span class="muted small">Error: ${escHtml(r._error || 'unknown')}</span>`; return;
+  }
+  if (!r.versions || !r.versions.length) {
+    container.innerHTML = '<span class="muted small">No versioned copies found yet.</span>'; return;
+  }
+  container.innerHTML = r.versions.map(v => {
+    const ts   = v.savedUtc ? new Date(v.savedUtc).toISOString().replace('T', ' ').slice(0, 19) : '';
+    const meta = v.meta ? ` <span class="muted small" title="${escHtml(JSON.stringify(v.meta, null, 2))}">📄 meta</span>` : '';
+    return `<div class="version-row"><strong class="mono">${escHtml(v.fileName)}</strong><span class="muted small">${ts} · ${v.sizeBytes} B</span>${meta}</div>`;
+  }).join('');
+}
+
+// ── WebSocket live logs ───────────────────────────────────────────────────────
+function wsConnectLogs() {
+  if (_wsSocket && _wsSocket.readyState < 2) return;
+  const host  = document.getElementById('rem-host')?.value.trim() || 'localhost';
+  const port  = document.getElementById('rem-port')?.value || 8181;
+  const token = remoteToken();
+  const url   = `ws://${host}:${port}/ws/logs${token ? '?token=' + encodeURIComponent(token) : ''}`;
+  document.getElementById('ws-status').textContent = 'Connecting…';
+  _wsSocket = new WebSocket(url);
+  _wsSocket.onopen = () => {
+    document.getElementById('ws-status').textContent = '● Connected';
+    document.getElementById('btn-ws-connect').style.display = 'none';
+    document.getElementById('btn-ws-disconnect').style.display = '';
+    wsAppendLog('[system] Connected to ' + url);
+  };
+  _wsSocket.onmessage = e => {
+    let msg = e.data;
+    try {
+      const obj = JSON.parse(e.data);
+      msg = `[${obj.level || 'LOG'}] ${obj.message || JSON.stringify(obj)}`;
+    } catch (_) { /* plain text */ }
+    const filter = document.getElementById('ws-log-filter').value;
+    if (!filter || msg.toUpperCase().includes(filter)) wsAppendLog(msg);
+  };
+  _wsSocket.onerror  = () => wsAppendLog('[system] WebSocket error');
+  _wsSocket.onclose  = () => {
+    document.getElementById('ws-status').textContent = '○ Disconnected';
+    document.getElementById('btn-ws-connect').style.display = '';
+    document.getElementById('btn-ws-disconnect').style.display = 'none';
+    wsAppendLog('[system] Disconnected');
+    _wsSocket = null;
+  };
+}
+function wsDisconnectLogs() { if (_wsSocket) { _wsSocket.close(); _wsSocket = null; } }
+function wsAppendLog(msg) {
+  const el = document.getElementById('ws-log-lines');
+  if (!el) return;
+  const ts   = new Date().toISOString().replace('T', ' ').slice(0, 23);
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.textContent = `[${ts}] ${msg}`;
+  el.appendChild(line);
+  if (document.getElementById('ws-autoscroll')?.checked) el.scrollTop = el.scrollHeight;
+  while (el.children.length > 500) el.removeChild(el.firstChild);
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────(async function init() {
   // Check auth-info: show banner immediately if token is required but not stored.
   try {
     const info = await fetch(BASE + '/api/public/auth-info').then(r => r.json());

@@ -241,6 +241,103 @@
     </div>
   </section>
 
+  <!-- ── Setup AI Workflow ──────────────────────────────────────────── -->
+  <section class="card full-width" id="card-setup-ai">
+    <h2>🤖 Setup AI Workflow <button class="btn-icon" onclick="toggleSection('setup-ai-body')" title="Expand">▾</button></h2>
+    <div id="setup-ai-body" style="display:none">
+
+      <div class="tab-bar">
+        <button class="tab-btn tab-active" onclick="aiShowTab('ai-tab-load')">📂 Load</button>
+        <button class="tab-btn"            onclick="aiShowTab('ai-tab-apply')">⚡ Apply</button>
+        <button class="tab-btn"            onclick="aiShowTab('ai-tab-diff')">📊 Diff</button>
+        <button class="tab-btn"            onclick="aiShowTab('ai-tab-versions')">🗂 Versions</button>
+        <button class="tab-btn"            onclick="aiShowTab('ai-tab-logs')">📡 Live Logs</button>
+      </div>
+
+      <!-- Load tab -->
+      <div id="ai-tab-load" class="tab-pane">
+        <div class="form-grid" style="grid-template-columns:repeat(3,1fr)">
+          <label>Car
+            <select id="ai-car" onchange="aiLoadTracks()">
+              <option value="">— select car —</option>
+            </select>
+          </label>
+          <label>Track
+            <select id="ai-track" onchange="aiLoadSetups()">
+              <option value="">— select track —</option>
+            </select>
+          </label>
+          <label>Base Setup
+            <select id="ai-setup" onchange="aiLoadContent()">
+              <option value="">— select setup —</option>
+            </select>
+          </label>
+        </div>
+        <div id="ai-loaded-badge" class="muted small" style="margin-top:6px"></div>
+        <textarea id="ai-base-content" rows="12" readonly placeholder="Base INI content will appear here after selecting a setup file…"
+          style="font-family:var(--mono);font-size:12px;background:var(--surface2);border:1px solid var(--border);
+                 border-radius:var(--radius);color:var(--text);padding:8px;resize:vertical;width:100%;margin-top:8px"></textarea>
+      </div>
+
+      <!-- Apply tab -->
+      <div id="ai-tab-apply" class="tab-pane" style="display:none">
+        <div id="ai-changes-list" style="margin-bottom:8px">
+          <div class="muted small">No changes yet — click "+ Add Change" to add key/value patches.</div>
+        </div>
+        <button class="btn" onclick="aiAddChange()">+ Add Change</button>
+        <div class="form-actions" style="margin-top:12px;flex-wrap:wrap;gap:10px">
+          <label style="font-size:12px;display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="ai-versioned" checked> Create versioned copy
+          </label>
+          <label style="font-size:12px;display:flex;align-items:center;gap:6px">
+            Reason&nbsp;<input id="ai-reason" type="text" placeholder="AI" style="width:80px;padding:4px 6px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px">
+          </label>
+          <button id="btn-ai-apply" class="btn btn-primary" onclick="aiApply()" disabled>⚡ Apply</button>
+          <span id="ai-apply-status" class="cfg-msg"></span>
+        </div>
+        <div id="ai-applied-badge" style="display:none;margin-top:10px;padding:8px 12px;background:var(--surface2);
+             border:1px solid var(--border);border-radius:var(--radius);font-size:12px"></div>
+      </div>
+
+      <!-- Diff tab -->
+      <div id="ai-tab-diff" class="tab-pane" style="display:none">
+        <div id="ai-diff-empty" class="muted small">No diff yet — apply changes first.</div>
+        <table id="ai-diff-table" class="diff-table" style="display:none">
+          <thead><tr><th>Section</th><th>Key</th><th>Old Value</th><th>New Value</th></tr></thead>
+          <tbody id="ai-diff-tbody"></tbody>
+        </table>
+      </div>
+
+      <!-- Versions tab -->
+      <div id="ai-tab-versions" class="tab-pane" style="display:none">
+        <div class="form-actions" style="margin-bottom:8px">
+          <button class="btn" onclick="aiLoadVersions()">🔄 Refresh Versions</button>
+        </div>
+        <div id="ai-versions-list" class="muted small">Select car, track and base setup in the Load tab, then click Refresh.</div>
+      </div>
+
+      <!-- Live Logs tab -->
+      <div id="ai-tab-logs" class="tab-pane" style="display:none">
+        <div class="logs-toolbar">
+          <select id="ws-log-filter">
+            <option value="">All levels</option>
+            <option value="INFO">INFO</option>
+            <option value="WARN">WARN</option>
+            <option value="ERR">ERR</option>
+          </select>
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px">
+            <input type="checkbox" id="ws-autoscroll" checked> Autoscroll
+          </label>
+          <button class="btn" id="btn-ws-connect" onclick="wsConnectLogs()">🔌 Connect</button>
+          <button class="btn btn-red" id="btn-ws-disconnect" onclick="wsDisconnectLogs()" style="display:none">✕ Disconnect</button>
+          <span id="ws-status" class="muted small"></span>
+        </div>
+        <div id="ws-log-lines" class="log-lines" style="height:280px"></div>
+      </div>
+
+    </div>
+  </section>
+
   <section class="card full-width" id="card-diag">
     <h2>🔍 Diagnostics <button class="btn-icon" onclick="toggleSection('diag-body')" title="Expand">▾</button></h2>
     <div id="diag-body" style="display:none">

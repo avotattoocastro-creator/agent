@@ -268,3 +268,40 @@ kbd {
 }
 .remote-term-line { padding: 1px 0; border-bottom: 1px solid var(--border); line-height: 1.6; }
 .remote-term-line:last-child { border-bottom: none; }
+
+/* ── Setup AI – tabs ────────────────────────────────────────────────────────── */
+.tab-bar { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid var(--border); padding-bottom: 4px; flex-wrap: wrap; }
+.tab-btn {
+  padding: 5px 14px; border: 1px solid transparent;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: none; color: var(--muted);
+  cursor: pointer; font-size: 12px; font-weight: 600;
+  transition: color .15s, background .15s;
+}
+.tab-btn:hover { color: var(--text); background: var(--surface2); }
+.tab-active { background: var(--surface2) !important; color: var(--text) !important; border-color: var(--border) !important; }
+
+/* ── Setup AI – change rows ─────────────────────────────────────────────────── */
+.ai-change-row {
+  display: flex; gap: 6px; align-items: center; margin-bottom: 6px;
+}
+.ai-change-row input {
+  padding: 5px 8px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text); font-size: 12px;
+  font-family: var(--mono);
+}
+
+/* ── Setup AI – diff table ──────────────────────────────────────────────────── */
+.diff-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--mono); margin-top: 8px; }
+.diff-table th { text-align: left; padding: 5px 8px; background: var(--surface2); color: var(--muted); border-bottom: 1px solid var(--border); }
+.diff-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.diff-old { color: var(--red); }
+.diff-new { color: var(--green); }
+
+/* ── Setup AI – version rows ────────────────────────────────────────────────── */
+.version-row {
+  display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+  padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px;
+}
+.version-row:last-child { border-bottom: none; }

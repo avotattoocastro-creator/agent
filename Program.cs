@@ -6,6 +6,7 @@ using System.Net.WebSockets;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using AvoTelemetryAgent.Services;
 using AvoTelemetryAgent.SharedMemory;
 using AvoTelemetryAgent.UI;
@@ -678,21 +679,12 @@ app.MapPost("/api/reference/setup/apply", async (
     if (baseFilePath is null || !File.Exists(baseFilePath))
         return Results.NotFound(new { error = "Base setup file not found." });
 
-    // Determine saved file name.
-    string savedFile;
-    if (req.CreateVersionedCopy)
-    {
-        var tag      = string.IsNullOrWhiteSpace(req.Reason) ? "AI" : SanitiseSegment(req.Reason.Trim()) ?? "AI";
-        var baseName = Path.GetFileNameWithoutExtension(req.BaseFile);
-        var ts       = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
-        savedFile    = $"{baseName}__{tag}_{ts}.ini";
-    }
-    else
-    {
-        savedFile = req.BaseFile;
-    }
+    var dir      = Path.Combine(root, req.Car, req.Track);
+    var baseName = Path.GetFileNameWithoutExtension(req.BaseFile);
+    var savedFile = req.CreateVersionedCopy
+        ? MakeVersionedFileName(dir, baseName)
+        : req.BaseFile;
 
-    var dir     = Path.Combine(root, req.Car, req.Track);
     var absPath = SafeRefPath(root, req.Car, req.Track, savedFile);
     if (absPath is null)
         return Results.BadRequest(new { error = "Resolved path escapes reference root." });
@@ -704,19 +696,115 @@ app.MapPost("/api/reference/setup/apply", async (
     try
     {
         var originalText = await File.ReadAllTextAsync(baseFilePath);
+        var before       = ParseIniSections(originalText);
         var patched      = PatchIni(originalText, req.Changes);
+        var after        = ParseIniSections(patched);
+
+        // Build per-change diff (oldValue is null when the key is new).
+        var diff = req.Changes.Select(c =>
+        {
+            var oldVal = before.TryGetValue(c.Section, out var bs) && bs.TryGetValue(c.Key, out var ov) ? ov : (string?)null;
+            var newVal = after.TryGetValue(c.Section, out var afs) && afs.TryGetValue(c.Key, out var nv) ? nv : (string?)null;
+            return new { section = c.Section, key = c.Key, oldValue = oldVal, newValue = newVal };
+        }).ToList();
+
         Directory.CreateDirectory(dir);
         var tmp = absPath + ".tmp";
-        await File.WriteAllTextAsync(tmp, patched);
-        File.Move(tmp, absPath, overwrite: !req.CreateVersionedCopy);
+        try
+        {
+            await File.WriteAllTextAsync(tmp, patched);
+            File.Move(tmp, absPath, overwrite: !req.CreateVersionedCopy);
+        }
+        finally
+        {
+            if (File.Exists(tmp)) try { File.Delete(tmp); } catch { /* best effort */ }
+        }
+
+        if (req.CreateVersionedCopy)
+        {
+            var vLabel = savedFile.Contains("__v") ? savedFile.Split("__v").Last().Replace(".ini", "") : "001";
+            logger.LogInformation("VERSIONED SAVE: savedFile={SavedFile} v={Version}", savedFile, vLabel);
+
+            // Save metadata JSON alongside the INI — failure must never block the response.
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var meta     = new SetupSaveMetadata(req.BaseFile, savedFile,
+                        DateTime.UtcNow.ToString("O"), req.Car, req.Track, req.Changes,
+                        req.Reason, "AvoPerformanceSetupAI", AgentVersion());
+                    var metaJson = JsonSerializer.Serialize(meta,
+                        new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                    await File.WriteAllTextAsync(Path.ChangeExtension(absPath, ".meta.json"), metaJson);
+                }
+                catch (Exception ex) { logger.LogWarning("META WRITE FAILED: {Msg}", ex.Message); }
+            });
+        }
+
         logger.LogInformation("SAVE OK path={Path}", absPath);
-        return Results.Ok(new { ok = true, savedFile, path = absPath });
+        return Results.Ok(new { ok = true, savedFile, path = absPath, diff });
     }
     catch (Exception ex)
     {
         logger.LogError(ex, "SAVE ERR ex={Message}", ex.Message);
         return Results.Problem(ex.Message);
     }
+});
+
+// ── GET /api/reference/setup/versions?car=...&track=...&baseFile=... ──────────
+app.MapGet("/api/reference/setup/versions", async (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    [FromQuery] string? car,
+    [FromQuery] string? track,
+    [FromQuery] string? baseFile) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+
+    if (string.IsNullOrWhiteSpace(car)      || !IsValidRefSegment(car))
+        return Results.BadRequest(new { error = "Valid car is required." });
+    if (string.IsNullOrWhiteSpace(track)    || !IsValidRefSegment(track))
+        return Results.BadRequest(new { error = "Valid track is required." });
+    if (string.IsNullOrWhiteSpace(baseFile) || !IsValidRefIniFile(baseFile))
+        return Results.BadRequest(new { error = "Valid baseFile (.ini) is required." });
+
+    var root = cfgSvc.Current.Setup.ReferenceRoot;
+    if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+        return Results.BadRequest(new { error = "ReferenceRoot is not configured." });
+
+    // Use a dummy filename to derive the directory safely.
+    var probe   = SafeRefPath(root, car, track, "x.ini");
+    if (probe is null) return Results.BadRequest(new { error = "Invalid path." });
+    var dirPath = Path.GetDirectoryName(probe)!;
+
+    if (!Directory.Exists(dirPath))
+        return Results.Ok(new { ok = true, versions = Array.Empty<object>() });
+
+    var baseName = Path.GetFileNameWithoutExtension(baseFile);
+    var iniFiles = Directory.GetFiles(dirPath, $"{baseName}__AI__*.ini", SearchOption.TopDirectoryOnly)
+        .Where(f => !f.EndsWith(".meta.json", StringComparison.OrdinalIgnoreCase))
+        .OrderBy(f => f)
+        .ToList();
+
+    var versions = new List<object>();
+    foreach (var iniPath in iniFiles)
+    {
+        var fi       = new FileInfo(iniPath);
+        object? meta = null;
+        var metaPath = Path.ChangeExtension(iniPath, ".meta.json");
+        if (File.Exists(metaPath))
+        {
+            try
+            {
+                var txt = await File.ReadAllTextAsync(metaPath);
+                meta = JsonSerializer.Deserialize<object>(txt);
+            }
+            catch { /* metadata is optional */ }
+        }
+        versions.Add(new { fileName = fi.Name, savedUtc = fi.LastWriteTimeUtc, sizeBytes = fi.Length, meta });
+    }
+
+    return Results.Ok(new { ok = true, versions });
 });
 
 // ── GET /api/setups/reference/list?carId=...&trackId=... ─────────────────────
@@ -979,6 +1067,21 @@ static string NextVersionedFileName(string dir, string baseName)
     return $"{baseName}_{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}.ini";
 }
 
+/// <summary>
+/// Builds a versioned filename: <c>{baseName}__AI__{yyyyMMdd_HHmmss}__v{NNN}.ini</c>.
+/// The zero-padded increment reflects how many existing versioned copies are already
+/// in <paramref name="dir"/> so callers can see the history at a glance.
+/// </summary>
+static string MakeVersionedFileName(string dir, string baseName)
+{
+    var ts = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+    int existing = Directory.Exists(dir)
+        ? Directory.GetFiles(dir, $"{baseName}__AI__*.ini", SearchOption.TopDirectoryOnly).Length
+        : 0;
+    var v = (existing + 1).ToString("D3");
+    return $"{baseName}__AI__{ts}__v{v}.ini";
+}
+
 // ── INI patch helper ──────────────────────────────────────────────────────────
 /// <summary>
 /// Applies a list of Section/Key/Value changes to raw INI text.
@@ -988,7 +1091,9 @@ static string NextVersionedFileName(string dir, string baseName)
 /// </summary>
 static string PatchIni(string original, IEnumerable<ApplySetupChangeDto> changes)
 {
-    var lines = new List<string>(original.Split('\n'));
+    // Detect and preserve the original line-ending style.
+    var sep   = original.Contains("\r\n") ? "\r\n" : "\n";
+    var lines = new List<string>(original.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None));
 
     foreach (var change in changes)
     {
@@ -1042,11 +1147,41 @@ static string PatchIni(string original, IEnumerable<ApplySetupChangeDto> changes
         }
     }
 
-    return string.Join('\n', lines);
+    return string.Join(sep, lines);
+}
+
+// ── INI section parser ────────────────────────────────────────────────────────
+/// <summary>
+/// Parses raw INI text into a two-level dictionary [section][key] = value.
+/// Keys in the header (before the first section) are stored under the empty string key.
+/// Comment lines (starting with ; or #) are ignored.
+/// </summary>
+static Dictionary<string, Dictionary<string, string>> ParseIniSections(string text)
+{
+    var result  = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+    var section = string.Empty;
+    result[section] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var raw in text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+    {
+        var line = raw.Trim();
+        if (line.Length == 0 || line[0] == ';' || line[0] == '#') continue;
+        if (line[0] == '[' && line[^1] == ']')
+        {
+            section = line[1..^1].Trim();
+            if (!result.ContainsKey(section))
+                result[section] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+        else
+        {
+            var eq = line.IndexOf('=');
+            if (eq < 0) continue;
+            result[section][line[..eq].Trim()] = line[(eq + 1)..].Trim();
+        }
+    }
+    return result;
 }
 
 // ── Shared setup-save logic ───────────────────────────────────────────────────
-
 static async Task<IResult> ExecuteSetupSave(
     AgentConfigService cfgSvc,
     ILogger logger,
@@ -1137,6 +1272,17 @@ record ApplySetupRequestDto(
     List<ApplySetupChangeDto>? Changes,
     bool                       CreateVersionedCopy = false,
     string?                    Reason              = null);
+
+record SetupSaveMetadata(
+    string                    BaseFile,
+    string                    SavedFile,
+    string                    CreatedUtc,
+    string                    Car,
+    string                    Track,
+    List<ApplySetupChangeDto> Changes,
+    string?                   Reason,
+    string                    Client,
+    string                    AgentVersion);
 
 record SetupApplyRequest(
     string? Car,
