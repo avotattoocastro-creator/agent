@@ -241,22 +241,47 @@ app.MapGet("/api/admin/state", (
     AcProcessMonitor monitor,
     MetricsHub metrics) =>
 {
+    var lastFrame = runtime.LastFrameUtc;
+    var sharedMemoryConnected =
+        monitor.AcProcessRunning &&
+        runtime.AcConnected &&
+        lastFrame != DateTime.MinValue &&
+        (DateTime.UtcNow - lastFrame).TotalSeconds < 5;
+
+    var asmLocation = Assembly.GetExecutingAssembly().Location;
+    var buildDate   = File.Exists(asmLocation)
+        ? File.GetLastWriteTimeUtc(asmLocation).ToString("O")
+        : (string?)null;
+    var commit = Environment.GetEnvironmentVariable("GIT_COMMIT");
+
+    var webRootOk  = Directory.Exists(Path.Combine(AppContext.BaseDirectory, "wwwroot"));
+
     return Results.Ok(new
     {
-        isRunning           = runtime.IsRunning,
-        startedUtc          = runtime.StartedUtc,
-        uptimeSeconds       = runtime.IsRunning ? (DateTime.UtcNow - runtime.StartedUtc).TotalSeconds : 0,
-        connectedClients    = runtime.ConnectedClients,
-        lastStatusMessage   = runtime.LastStatusMessage,
-        physicsHzActual     = runtime.PhysicsHzActual,
-        graphicsHzActual    = runtime.GraphicsHzActual,
-        acConnected         = runtime.AcConnected,
-        acProcessRunning    = monitor.AcProcessRunning,
-        carId               = runtime.CarId,
-        trackId             = runtime.TrackId,
-        agentVersion        = AgentVersion(),
-        memoryMb            = metrics.MemoryUsageMB,
-        restartCount        = metrics.RestartCount,
+        version               = AgentVersion(),
+        buildDate,
+        commit,
+        isRunning             = runtime.IsRunning,
+        startedUtc            = runtime.StartedUtc,
+        uptimeSeconds         = runtime.IsRunning ? (DateTime.UtcNow - runtime.StartedUtc).TotalSeconds : 0,
+        connectedClients      = runtime.ConnectedClients,
+        lastStatusMessage     = runtime.LastStatusMessage,
+        lastError             = runtime.LastError,
+        physicsHzActual       = runtime.PhysicsHzActual,
+        graphicsHzActual      = runtime.GraphicsHzActual,
+        acConnected           = runtime.AcConnected,
+        acRunning             = monitor.AcProcessRunning,
+        acProcessRunning      = monitor.AcProcessRunning,
+        sharedMemoryConnected,
+        activeCarId           = runtime.CarId,
+        activeTrackId         = runtime.TrackId,
+        carId                 = runtime.CarId,
+        trackId               = runtime.TrackId,
+        lastFrameUtc          = lastFrame == DateTime.MinValue ? (DateTime?)null : lastFrame,
+        agentVersion          = AgentVersion(),
+        memoryMb              = metrics.MemoryUsageMB,
+        restartCount          = metrics.RestartCount,
+        webRootOk,
     });
 });
 
@@ -770,31 +795,38 @@ app.MapPost("/api/reference/setup/apply", async (
             });
     }
 
-    // ── Determine live-apply eligibility (informational, save is never blocked) ─
-    string? liveApplyReason = null;
+    // ── Live-apply gating (hard block, not informational) ────────────────────
+    if (!runtime.IsRunning)
+    {
+        logBuf.Add(LogLevel.Warning, "WebUI", "LIVE APPLY BLOCKED: reason=Agent not running");
+        return Results.Conflict(new { error = "Agent not running" });
+    }
     if (!monitor.AcProcessRunning)
     {
-        liveApplyReason = "Assetto Corsa not running";
-        logBuf.Add(LogLevel.Warning, "WebUI",
-            "LIVE APPLY skipped: Assetto Corsa not running");
+        logBuf.Add(LogLevel.Warning, "WebUI", "LIVE APPLY BLOCKED: reason=Assetto Corsa not running");
+        return Results.Conflict(new { error = "Assetto Corsa not running" });
     }
-    else if (!runtime.AcConnected)
     {
-        liveApplyReason = "Shared Memory not connected";
-        logBuf.Add(LogLevel.Warning, "WebUI",
-            "LIVE APPLY skipped: Shared Memory not connected");
-    }
-    else
-    {
-        var activeCar = runtime.CarId;
-        if (!string.IsNullOrWhiteSpace(activeCar) &&
-            !activeCar.Equals(req.Car, StringComparison.OrdinalIgnoreCase))
+        var lf = runtime.LastFrameUtc;
+        if (!runtime.AcConnected || lf == DateTime.MinValue || (DateTime.UtcNow - lf).TotalSeconds >= 5)
         {
-            liveApplyReason = "Car mismatch";
-            logBuf.Add(LogLevel.Warning, "WebUI",
-                $"LIVE APPLY skipped: Car mismatch requested={req.Car} active={activeCar}");
+            logBuf.Add(LogLevel.Warning, "WebUI", "LIVE APPLY BLOCKED: reason=Shared Memory not connected");
+            return Results.Conflict(new { error = "Shared Memory not connected" });
         }
     }
+    {
+        var activeCar = runtime.CarId;
+        if (!string.IsNullOrWhiteSpace(activeCar) && !string.IsNullOrWhiteSpace(req.Car) &&
+            !activeCar.Equals(req.Car, StringComparison.OrdinalIgnoreCase))
+        {
+            logBuf.Add(LogLevel.Warning, "WebUI",
+                $"LIVE APPLY BLOCKED: reason=Car mismatch requested={req.Car} active={activeCar}");
+            return Results.Conflict(new { error = "Car mismatch", requested = req.Car, active = activeCar });
+        }
+    }
+
+    // All gating passed — file save proceeds. Live apply into AC runtime is not yet
+    // implemented; the saved file will be returned with liveApplyOk = false.
 
     var root = cfgSvc.Current.Setup.ReferenceRoot;
     if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
@@ -899,9 +931,7 @@ app.MapPost("/api/reference/setup/apply", async (
 
         logger.LogInformation("SAVE OK path={Path}", absPath);
         logBuf.Add(LogLevel.Information, "WebUI", $"APPLY OK savedFile={savedFile} path={absPath}");
-        if (liveApplyReason is null)
-            logBuf.Add(LogLevel.Information, "WebUI", "LIVE APPLY succeeded");
-        return Results.Ok(new { savedOk = true, savedFile, path = absPath, appliedOk = liveApplyReason is null, reason = liveApplyReason, diff });
+        return Results.Ok(new { savedOk = true, savedFile, path = absPath, appliedOk = false, reason = "Live apply not yet implemented", diff });
     }
     catch (Exception ex)
     {

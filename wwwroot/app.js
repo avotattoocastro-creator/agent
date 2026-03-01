@@ -176,13 +176,13 @@ async function refreshState() {
   document.getElementById('btn-start').disabled = s.isRunning;
   document.getElementById('btn-stop').disabled  = !s.isRunning;
 
-  // AC
-  const acProc = s.acProcessRunning;
-  const acMem  = s.acConnected;
+  // AC — support both field names: acRunning (new) and acProcessRunning (legacy)
+  const acProc = s.acRunning || s.acProcessRunning;
+  const acMem  = s.sharedMemoryConnected !== undefined ? s.sharedMemoryConnected : s.acConnected;
   setPill('ac-process', acProc ? 'Running'       : 'Not running', acProc);
   setPill('ac-memory',  acMem  ? 'Connected'     : 'Not connected', acMem);
-  document.getElementById('ac-car').textContent   = s.carId   || '—';
-  document.getElementById('ac-track').textContent = s.trackId || '—';
+  document.getElementById('ac-car').textContent   = s.activeCarId   || s.carId   || '—';
+  document.getElementById('ac-track').textContent = s.activeTrackId || s.trackId || '—';
 
   // Metrics
   setText('m-clients', s.connectedClients ?? 0);
@@ -789,6 +789,12 @@ async function aiApply() {
     reason:             document.getElementById('ai-reason').value.trim() || 'AI',
   };
   const r = await remoteApi('POST', '/api/reference/setup/apply', body);
+  if (r._status === 409) {
+    const msg = (r.error || r._error || 'Precondition failed') + (r.requested ? ` (requested: ${r.requested}, active: ${r.active})` : '');
+    status.textContent = '⛔ ' + msg; status.className = 'cfg-msg err';
+    remoteLog('AI: Apply BLOCKED: ' + msg);
+    btn.disabled = false; return;
+  }
   if (r._error || !r.savedOk) {
     const msg = r._error || (r.error && r.details ? `${r.error}: ${r.details}` : (r.error || 'Apply failed'));
     status.textContent = '✗ ' + msg; status.className = 'cfg-msg err';

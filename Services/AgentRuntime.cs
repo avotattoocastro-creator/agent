@@ -25,6 +25,7 @@ public sealed class AgentRuntime : BackgroundService
     public bool     IsRunning           { get; private set; }
     public DateTime StartedUtc          { get; private set; }
     public string   LastStatusMessage   { get; private set; } = "initializing";
+    public string?  LastError           { get; private set; }
     public bool     AcConnected         => _reader.IsConnected;
     public string   CarId               => _telemetry.CarId;
     public string   TrackId             => _telemetry.TrackId;
@@ -83,7 +84,14 @@ public sealed class AgentRuntime : BackgroundService
             IsRunning         = true;
             StartedUtc        = DateTime.UtcNow;
             LastStatusMessage = "running";
+            LastError         = null;
             _log.LogInformation("Agent streaming started");
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            _log.LogError(ex, "Agent streaming start failed");
+            throw;
         }
         finally { _lock.Release(); }
     }
@@ -98,6 +106,12 @@ public sealed class AgentRuntime : BackgroundService
             IsRunning         = false;
             LastStatusMessage = "stopped";
             _log.LogInformation("Agent streaming stopped");
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            _log.LogError(ex, "Agent streaming stop failed");
+            throw;
         }
         finally { _lock.Release(); }
     }
