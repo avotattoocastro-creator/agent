@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AvoTelemetryAgent</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────────── -->
+<header>
+  <div class="header-left">
+    <span class="logo">🥑 AvoTelemetryAgent</span>
+    <span id="agent-version" class="badge-pill muted"></span>
+  </div>
+  <div class="header-right">
+    <label class="token-label">Token
+      <input id="inp-token" type="password" placeholder="paste token…" autocomplete="off">
+      <button id="btn-show-token" class="btn-icon" title="Show/hide token">👁</button>
+    </label>
+    <span id="conn-dot" class="dot dot-off" title="Dashboard connected"></span>
+  </div>
+</header>
+
+<!-- ── Main grid ────────────────────────────────────────────────────────── -->
+<main>
+
+  <!-- ── Control card ──────────────────────────────────────────────────── -->
+  <section class="card" id="card-control">
+    <div class="card-row">
+      <div>
+        <div id="status-badge" class="status-badge badge-stopped">STOPPED</div>
+        <div id="uptime" class="muted small">uptime —</div>
+      </div>
+      <div class="btn-group">
+        <button id="btn-start" class="btn btn-green" onclick="ctrlStart()">▶ Start <kbd>S</kbd></button>
+        <button id="btn-stop"  class="btn btn-red"   onclick="ctrlStop()">■ Stop</button>
+      </div>
+    </div>
+    <div class="toggles">
+      <label class="toggle-row" title="Auto-start streaming when AC is detected">
+        <span>Auto-start when AC opens</span>
+        <input type="checkbox" id="tog-autostart" onchange="saveToggle('Agent.AutoStartStreaming', this.checked)">
+        <span class="toggle-track"></span>
+      </label>
+      <label class="toggle-row" title="Stop streaming when AC closes">
+        <span>Auto-stop when AC closes</span>
+        <input type="checkbox" id="tog-autostop" onchange="saveToggle('Agent.AutoStopWhenAcCloses', this.checked)">
+        <span class="toggle-track"></span>
+      </label>
+      <label class="toggle-row" title="Broadcast UDP discovery beacon">
+        <span>LAN discovery</span>
+        <input type="checkbox" id="tog-discovery" onchange="saveToggle('Discovery.Enabled', this.checked)">
+        <span class="toggle-track"></span>
+      </label>
+      <label class="toggle-row" title="Restrict admin UI to localhost">
+        <span>Admin UI localhost-only</span>
+        <input type="checkbox" id="tog-localhost" onchange="saveToggle('AdminUi.BindLocalhostOnly', this.checked)">
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+  </section>
+
+  <!-- ── AC Status card ────────────────────────────────────────────────── -->
+  <section class="card" id="card-ac">
+    <h2>Assetto Corsa</h2>
+    <table class="info-table">
+      <tr><td>Process</td><td><span id="ac-process" class="badge-pill badge-off">Not running</span></td></tr>
+      <tr><td>Shared Memory</td><td><span id="ac-memory" class="badge-pill badge-off">Not connected</span></td></tr>
+      <tr><td>Car</td><td id="ac-car" class="mono">—</td></tr>
+      <tr><td>Track</td><td id="ac-track" class="mono">—</td></tr>
+    </table>
+  </section>
+
+  <!-- ── Metrics card ──────────────────────────────────────────────────── -->
+  <section class="card" id="card-metrics">
+    <h2>Metrics</h2>
+    <div class="metrics-grid">
+      <div class="metric"><span id="m-clients">0</span><label>Clients</label></div>
+      <div class="metric"><span id="m-physhz">0</span><label>Physics Hz</label></div>
+      <div class="metric"><span id="m-gfxhz">0</span><label>Graphics Hz</label></div>
+      <div class="metric"><span id="m-fps">0</span><label>Frames/s</label></div>
+      <div class="metric"><span id="m-lat">0</span><label>Latency ms</label></div>
+      <div class="metric"><span id="m-drop">0</span><label>Dropped</label></div>
+      <div class="metric"><span id="m-mem">0</span><label>Memory MB</label></div>
+      <div class="metric"><span id="m-restarts">0</span><label>Restarts</label></div>
+    </div>
+  </section>
+
+  <!-- ── Charts card ───────────────────────────────────────────────────── -->
+  <section class="card full-width" id="card-charts">
+    <h2>Live Charts <span class="muted small">(60 s)</span></h2>
+    <div class="charts-row">
+      <canvas id="chart-physhz"  width="260" height="70" title="Physics Hz"></canvas>
+      <canvas id="chart-gfxhz"   width="260" height="70" title="Graphics Hz"></canvas>
+      <canvas id="chart-clients" width="260" height="70" title="WS Clients"></canvas>
+      <canvas id="chart-fps"     width="260" height="70" title="Frames/s"></canvas>
+      <canvas id="chart-lat"     width="260" height="70" title="Avg Latency ms"></canvas>
+    </div>
+  </section>
+
+  <!-- ── Endpoints card ───────────────────────────────────────────────── -->
+  <section class="card" id="card-endpoints">
+    <h2>Endpoints</h2>
+    <div class="endpoint-row">
+      <span class="ep-label">WebSocket</span>
+      <code id="ep-ws" class="ep-url"></code>
+      <button class="btn-icon" onclick="copyEp('ep-ws')" title="Copy">⎘</button>
+    </div>
+    <div class="endpoint-row">
+      <span class="ep-label">Ping API</span>
+      <code id="ep-ping" class="ep-url"></code>
+      <button class="btn-icon" onclick="copyEp('ep-ping')" title="Copy">⎘</button>
+    </div>
+  </section>
+
+  <!-- ── Autostart card ───────────────────────────────────────────────── -->
+  <section class="card" id="card-autostart">
+    <h2>Windows Auto-start</h2>
+    <p class="muted small">Creates a Task Scheduler entry that launches the agent at user logon.</p>
+    <div class="card-row">
+      <span id="autostart-status" class="badge-pill badge-off">Checking…</span>
+      <div class="btn-group">
+        <button class="btn btn-green" onclick="autostartEnable()">Enable</button>
+        <button class="btn btn-red"   onclick="autostartDisable()">Disable</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Configuration card ───────────────────────────────────────────── -->
+  <section class="card full-width" id="card-config">
+    <h2>⚙ Configuration <button class="btn-icon" onclick="toggleSection('cfg-body')" title="Expand">▾</button></h2>
+    <div id="cfg-body">
+      <form id="cfg-form" onsubmit="saveConfig(event)">
+        <div class="form-grid">
+          <label>Token
+            <div class="inp-row">
+              <input id="cfg-token" type="password" name="Token" placeholder="enter new token to change…">
+              <button type="button" class="btn-icon" onclick="togglePwd('cfg-token')">👁</button>
+              <span id="cfg-token-status" class="badge-pill badge-off" style="margin-left:4px;font-size:11px"></span>
+            </div>
+          </label>
+          <label>HTTP Port <input id="cfg-port" type="number" name="Port" min="1" max="65535"></label>
+          <label>Physics Hz <input id="cfg-physhz" type="number" name="PhysicsHz" min="1" max="200"></label>
+          <label>Graphics Hz <input id="cfg-gfxhz" type="number" name="GraphicsHz" min="1" max="60"></label>
+          <label>Static Hz <input id="cfg-statichz" type="number" name="StaticHz" min="1" max="10"></label>
+          <label>Setup Root
+            <div class="inp-row">
+              <input id="cfg-setuproot" type="text" name="Setup.DefaultRoot" placeholder="default: Documents/Assetto Corsa/setups">
+              <button type="button" class="btn-icon" onclick="openFolder('setups')" title="Open in Explorer">📂</button>
+            </div>
+          </label>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">💾 Save Config</button>
+          <span id="cfg-msg" class="cfg-msg"></span>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <!-- ── Reference Setups Folder card ─────────────────────────────────── -->
+  <section class="card full-width" id="card-refroot">
+    <h2>📁 Reference Setups Folder <button class="btn-icon" onclick="toggleSection('refroot-body')" title="Expand">▾</button></h2>
+    <div id="refroot-body">
+      <div class="form-grid" style="grid-template-columns:1fr auto auto auto">
+        <label>Reference Root Path
+          <div class="inp-row">
+            <input id="inp-refroot" type="text" placeholder="e.g. C:\ReferenceSetups">
+            <button type="button" class="btn-icon" onclick="refBrowse()" title="Browse…">📂</button>
+          </div>
+        </label>
+      </div>
+      <div class="form-actions" style="margin-top:8px">
+        <button class="btn btn-primary" onclick="refSave()">💾 Save Path</button>
+        <button class="btn"             onclick="refRescan()">🔄 Rescan</button>
+        <span id="refroot-msg" class="cfg-msg"></span>
+      </div>
+      <div id="refroot-counts" class="muted small" style="margin-top:8px"></div>
+    </div>
+  </section>
+
+
+  <!-- ── Remote Setups card ───────────────────────────────────────────── -->
+  <section class="card full-width" id="card-remote">
+    <h2>🌐 Remote Setups <button class="btn-icon" onclick="toggleSection('remote-body')" title="Expand">▾</button></h2>
+    <div id="remote-body" style="display:none">
+      <div class="toggles" style="margin-bottom:10px">
+        <label class="toggle-row" title="Connect to a remote Agent instance and save setups there">
+          <span>Remote Mode</span>
+          <input type="checkbox" id="tog-remote" onchange="onRemoteModeChange()">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div class="form-grid">
+        <label>Host
+          <input id="rem-host" type="text" placeholder="192.168.1.10" oninput="saveRemoteConfig()">
+        </label>
+        <label>Port
+          <input id="rem-port" type="number" placeholder="8181" min="1" max="65535" oninput="saveRemoteConfig()">
+        </label>
+        <label>Token
+          <div class="inp-row">
+            <input id="rem-token" type="password" placeholder="API token" autocomplete="off" oninput="saveRemoteConfig()">
+            <button type="button" class="btn-icon" onclick="togglePwd('rem-token')">👁</button>
+          </div>
+        </label>
+      </div>
+      <div id="remote-controls" style="display:none">
+        <div class="form-grid" style="margin-top:10px">
+          <label>Car
+            <select id="rem-car" onchange="remoteLoadTracks()">
+              <option value="">— select car —</option>
+            </select>
+          </label>
+          <label>Track
+            <select id="rem-track" onchange="remoteLoadSetups()">
+              <option value="">— select track —</option>
+            </select>
+          </label>
+          <label>Setup File
+            <select id="rem-setup" onchange="remoteLoadContent()">
+              <option value="">— select setup —</option>
+            </select>
+          </label>
+        </div>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted);margin-top:10px">
+          INI Content
+          <textarea id="rem-content" rows="10" placeholder="Setup INI content…" spellcheck="false"
+            style="font-family:var(--mono);font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);padding:8px;resize:vertical;width:100%"></textarea>
+        </label>
+        <div class="form-actions" style="margin-top:8px">
+          <button class="btn btn-primary" onclick="remoteSaveSetup()">💾 Save Remote Setup</button>
+          <span id="rem-msg" class="cfg-msg"></span>
+        </div>
+        <div style="margin-top:10px">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Terminal</div>
+          <div id="rem-terminal" class="remote-terminal"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Setup AI Workflow ──────────────────────────────────────────── -->
+  <section class="card full-width" id="card-setup-ai">
+    <h2>🤖 Setup AI Workflow <button class="btn-icon" onclick="toggleSection('setup-ai-body')" title="Expand">▾</button></h2>
+    <div id="setup-ai-body" style="display:none">
+
+      <div class="tab-bar">
+        <button class="tab-btn tab-active" onclick="aiShowTab('ai-tab-load')">📂 Load</button>
+        <button class="tab-btn"            onclick="aiShowTab('ai-tab-apply')">⚡ Apply</button>
+        <button class="tab-btn"            onclick="aiShowTab('ai-tab-diff')">📊 Diff</button>
+        <button class="tab-btn"            onclick="aiShowTab('ai-tab-versions')">🗂 Versions</button>
+        <button class="tab-btn"            onclick="aiShowTab('ai-tab-logs')">📡 Live Logs</button>
+      </div>
+
+      <!-- Load tab -->
+      <div id="ai-tab-load" class="tab-pane">
+        <div class="form-grid" style="grid-template-columns:repeat(3,1fr)">
+          <label>Car
+            <select id="ai-car" onchange="aiLoadTracks()">
+              <option value="">— select car —</option>
+            </select>
+          </label>
+          <label>Track
+            <select id="ai-track" onchange="aiLoadSetups()">
+              <option value="">— select track —</option>
+            </select>
+          </label>
+          <label>Base Setup
+            <select id="ai-setup" onchange="aiLoadContent()">
+              <option value="">— select setup —</option>
+            </select>
+          </label>
+        </div>
+        <div id="ai-loaded-badge" class="muted small" style="margin-top:6px"></div>
+        <textarea id="ai-base-content" rows="12" readonly placeholder="Base INI content will appear here after selecting a setup file…"
+          style="font-family:var(--mono);font-size:12px;background:var(--surface2);border:1px solid var(--border);
+                 border-radius:var(--radius);color:var(--text);padding:8px;resize:vertical;width:100%;margin-top:8px"></textarea>
+      </div>
+
+      <!-- Apply tab -->
+      <div id="ai-tab-apply" class="tab-pane" style="display:none">
+        <div id="ai-changes-list" style="margin-bottom:8px">
+          <div class="muted small">No changes yet — click "+ Add Change" to add key/value patches.</div>
+        </div>
+        <button class="btn" onclick="aiAddChange()">+ Add Change</button>
+        <div class="form-actions" style="margin-top:12px;flex-wrap:wrap;gap:10px">
+          <label style="font-size:12px;display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="ai-versioned" checked> Create versioned copy
+          </label>
+          <label style="font-size:12px;display:flex;align-items:center;gap:6px">
+            Reason&nbsp;<input id="ai-reason" type="text" placeholder="AI" style="width:80px;padding:4px 6px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px">
+          </label>
+          <button id="btn-ai-apply" class="btn btn-primary" onclick="aiApply()" disabled>⚡ Apply</button>
+          <span id="ai-apply-status" class="cfg-msg"></span>
+        </div>
+        <div id="ai-applied-badge" style="display:none;margin-top:10px;padding:8px 12px;background:var(--surface2);
+             border:1px solid var(--border);border-radius:var(--radius);font-size:12px"></div>
+      </div>
+
+      <!-- Diff tab -->
+      <div id="ai-tab-diff" class="tab-pane" style="display:none">
+        <div id="ai-diff-empty" class="muted small">No diff yet — apply changes first.</div>
+        <table id="ai-diff-table" class="diff-table" style="display:none">
+          <thead><tr><th>Section</th><th>Key</th><th>Old Value</th><th>New Value</th></tr></thead>
+          <tbody id="ai-diff-tbody"></tbody>
+        </table>
+      </div>
+
+      <!-- Versions tab -->
+      <div id="ai-tab-versions" class="tab-pane" style="display:none">
+        <div class="form-actions" style="margin-bottom:8px">
+          <button class="btn" onclick="aiLoadVersions()">🔄 Refresh Versions</button>
+        </div>
+        <div id="ai-versions-list" class="muted small">Select car, track and base setup in the Load tab, then click Refresh.</div>
+      </div>
+
+      <!-- Live Logs tab -->
+      <div id="ai-tab-logs" class="tab-pane" style="display:none">
+        <div class="logs-toolbar">
+          <select id="ws-log-filter">
+            <option value="">All levels</option>
+            <option value="INFO">INFO</option>
+            <option value="WARN">WARN</option>
+            <option value="ERR">ERR</option>
+          </select>
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px">
+            <input type="checkbox" id="ws-autoscroll" checked> Autoscroll
+          </label>
+          <button class="btn" id="btn-ws-connect" onclick="wsConnectLogs()">🔌 Connect</button>
+          <button class="btn btn-red" id="btn-ws-disconnect" onclick="wsDisconnectLogs()" style="display:none">✕ Disconnect</button>
+          <span id="ws-status" class="muted small"></span>
+        </div>
+        <div id="ws-log-lines" class="log-lines" style="height:280px"></div>
+      </div>
+
+    </div>
+  </section>
+
+  <section class="card full-width" id="card-diag">
+    <h2>🔍 Diagnostics <button class="btn-icon" onclick="toggleSection('diag-body')" title="Expand">▾</button></h2>
+    <div id="diag-body" style="display:none">
+      <button class="btn btn-primary" onclick="runDiag()" id="btn-diag">▶ Run Diagnostics <kbd>D</kbd></button>
+      <pre id="diag-out" class="diag-pre"></pre>
+    </div>
+  </section>
+
+  <!-- ── Logs card ────────────────────────────────────────────────────── -->
+  <section class="card full-width" id="card-logs">
+    <h2>📋 Logs <button class="btn-icon" onclick="toggleSection('logs-body')" title="Expand" id="logs-toggle-btn">▾</button></h2>
+    <div id="logs-body" style="display:none">
+      <div class="logs-toolbar">
+        <select id="log-level" onchange="refreshLogs()">
+          <option value="">All levels</option>
+          <option value="Debug">Debug+</option>
+          <option value="Information">Info+</option>
+          <option value="Warning">Warning+</option>
+          <option value="Error">Error+</option>
+        </select>
+        <input id="log-cat" type="text" placeholder="filter category…" oninput="refreshLogs()">
+        <button class="btn" onclick="exportLogs()">⬇ Export</button>
+        <button class="btn btn-red" onclick="clearLogs()">🗑 Clear</button>
+      </div>
+      <div id="log-lines" class="log-lines"></div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ── Toast ─────────────────────────────────────────────────────────────── -->
+<div id="toast" class="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
