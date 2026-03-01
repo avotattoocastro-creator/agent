@@ -159,7 +159,28 @@
     </div>
   </section>
 
-  <!-- ── Diagnostics card ─────────────────────────────────────────────── -->
+  <!-- ── Reference Setups Folder card ─────────────────────────────────── -->
+  <section class="card full-width" id="card-refroot">
+    <h2>📁 Reference Setups Folder <button class="btn-icon" onclick="toggleSection('refroot-body')" title="Expand">▾</button></h2>
+    <div id="refroot-body">
+      <div class="form-grid" style="grid-template-columns:1fr auto auto auto">
+        <label>Reference Root Path
+          <div class="inp-row">
+            <input id="inp-refroot" type="text" placeholder="e.g. C:\ReferenceSetups">
+            <button type="button" class="btn-icon" onclick="refBrowse()" title="Browse…">📂</button>
+          </div>
+        </label>
+      </div>
+      <div class="form-actions" style="margin-top:8px">
+        <button class="btn btn-primary" onclick="refSave()">💾 Save Path</button>
+        <button class="btn"             onclick="refRescan()">🔄 Rescan</button>
+        <span id="refroot-msg" class="cfg-msg"></span>
+      </div>
+      <div id="refroot-counts" class="muted small" style="margin-top:8px"></div>
+    </div>
+  </section>
+
+
   <section class="card full-width" id="card-diag">
     <h2>🔍 Diagnostics <button class="btn-icon" onclick="toggleSection('diag-body')" title="Expand">▾</button></h2>
     <div id="diag-body" style="display:none">
