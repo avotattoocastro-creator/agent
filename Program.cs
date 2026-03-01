@@ -678,10 +678,25 @@ app.MapGet("/api/reference/setup/read", async (
 app.MapPost("/api/reference/setup/apply", async (
     HttpContext ctx,
     AgentConfigService cfgSvc,
+    AgentRuntime runtime,
+    LogBuffer logBuf,
     ILogger<Program> logger,
     [FromBody] ApplySetupRequestDto req) =>
 {
     if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+
+    // ── Detailed diagnostic logging of the incoming request ──────────────────
+    var reqChangeSummary = req.Changes is { Count: > 0 }
+        ? string.Join(", ", req.Changes.Select(c => $"[{c.Section}]{c.Key}"))
+        : "(none)";
+    logBuf.Add(LogLevel.Information, "WebUI",
+        $"APPLY REQUEST car={req.Car} track={req.Track} baseFile={req.BaseFile} " +
+        $"changes={req.Changes?.Count ?? 0} ({reqChangeSummary}) " +
+        $"versioned={req.CreateVersionedCopy}");
+    logBuf.Add(LogLevel.Information, "WebUI",
+        $"AGENT STATE isRunning={runtime.IsRunning} " +
+        $"acConnected={runtime.AcConnected} " +
+        $"activeCar={runtime.CarId} activeTrack={runtime.TrackId}");
 
     if (string.IsNullOrWhiteSpace(req.Car)      || !IsValidRefSegment(req.Car))
         return Results.BadRequest(new { error = "Valid car is required." });
@@ -692,13 +707,37 @@ app.MapPost("/api/reference/setup/apply", async (
     if (req.Changes is null || req.Changes.Count == 0)
         return Results.BadRequest(new { error = "At least one change is required." });
 
+    // ── Agent / Shared Memory state diagnostics (informational, not blocking) ─
+    if (!runtime.IsRunning)
+    {
+        logBuf.Add(LogLevel.Warning, "WebUI",
+            "APPLY WARNING: Agent not running — setup will still be written to disk.");
+    }
+    if (!runtime.AcConnected)
+    {
+        logBuf.Add(LogLevel.Warning, "WebUI",
+            "APPLY WARNING: Shared Memory not connected — cannot verify active car.");
+    }
+    // Car mismatch check — warn but do not block (file-based apply is offline-capable).
+    var activeCar = runtime.CarId;
+    if (!string.IsNullOrWhiteSpace(activeCar) &&
+        !activeCar.Equals(req.Car, StringComparison.OrdinalIgnoreCase))
+    {
+        logBuf.Add(LogLevel.Warning, "WebUI",
+            $"APPLY WARNING: Car mismatch — requested '{req.Car}' but active car is '{activeCar}'.");
+    }
+
     var root = cfgSvc.Current.Setup.ReferenceRoot;
     if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
         return Results.BadRequest(new { error = "ReferenceRoot is not configured." });
 
     var baseFilePath = SafeRefPath(root, req.Car, req.Track, req.BaseFile);
     if (baseFilePath is null || !File.Exists(baseFilePath))
-        return Results.NotFound(new { error = "Base setup file not found." });
+    {
+        logBuf.Add(LogLevel.Error, "WebUI",
+            $"APPLY ERROR: Base file not found — path={baseFilePath ?? "(invalid)"}");
+        return Results.NotFound(new { error = "Base file not found.", path = baseFilePath });
+    }
 
     var dir      = Path.Combine(root, req.Car, req.Track);
     var baseName = Path.GetFileNameWithoutExtension(req.BaseFile);
@@ -710,6 +749,9 @@ app.MapPost("/api/reference/setup/apply", async (
     if (absPath is null)
         return Results.BadRequest(new { error = "Resolved path escapes reference root." });
 
+    logBuf.Add(LogLevel.Information, "WebUI",
+        $"APPLY TARGET path={absPath}");
+
     logger.LogInformation(
         "SAVE REQ car={Car} track={Track} file={File} versioned={Versioned} changes={Changes}",
         req.Car, req.Track, savedFile, req.CreateVersionedCopy, req.Changes.Count);
@@ -718,6 +760,30 @@ app.MapPost("/api/reference/setup/apply", async (
     {
         var originalText = await File.ReadAllTextAsync(baseFilePath);
         var before       = ParseIniSections(originalText);
+
+        // ── Log available parameters vs requested (capped to avoid huge entries) ─
+        const int MaxLoggedParams = 30;
+        var availableParams = before
+            .Where(s => s.Key != string.Empty)
+            .SelectMany(s => s.Value.Keys.Select(k => $"[{s.Key}]{k}"))
+            .ToList();
+        var availSummary = availableParams.Count > MaxLoggedParams
+            ? string.Join(", ", availableParams.Take(MaxLoggedParams)) + $", … (+{availableParams.Count - MaxLoggedParams} more)"
+            : string.Join(", ", availableParams);
+        logBuf.Add(LogLevel.Information, "WebUI",
+            $"APPLY AVAILABLE PARAMS ({availableParams.Count}): {availSummary}");
+
+        // ── Check each requested parameter against available ones ─────────────
+        var missingParams = req.Changes
+            .Where(c => !before.TryGetValue(c.Section, out var sec) || !sec.ContainsKey(c.Key))
+            .Select(c => $"[{c.Section}]{c.Key}")
+            .ToList();
+        if (missingParams.Count > 0)
+        {
+            logBuf.Add(LogLevel.Warning, "WebUI",
+                $"APPLY WARNING: Parameter(s) not found in setup (will be appended): {string.Join(", ", missingParams)}");
+        }
+
         var patched      = PatchIni(originalText, req.Changes);
         var after        = ParseIniSections(patched);
 
@@ -763,11 +829,14 @@ app.MapPost("/api/reference/setup/apply", async (
         }
 
         logger.LogInformation("SAVE OK path={Path}", absPath);
+        logBuf.Add(LogLevel.Information, "WebUI", $"APPLY OK savedFile={savedFile} path={absPath}");
         return Results.Ok(new { ok = true, savedFile, path = absPath, diff });
     }
     catch (Exception ex)
     {
         logger.LogError(ex, "SAVE ERR ex={Message}", ex.Message);
+        logBuf.Add(LogLevel.Error, "WebUI",
+            $"APPLY FAIL: {ex.GetType().Name}: {ex.Message}");
         return Results.Problem(ex.Message);
     }
 });
