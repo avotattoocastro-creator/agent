@@ -152,24 +152,26 @@ app.MapGet("/api/public/auth-info", () =>
 app.MapPost("/api/setup/apply", async (
     HttpContext ctx,
     AgentConfigService cfgSvc,
+    ILogger<Program> logger,
     [FromBody] SetupApplyRequest req) =>
 {
     if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
     return await ExecuteSetupSave(
-        cfgSvc, req.CarId, req.TrackId, req.FileName, req.SetupText,
-        overwrite: true, relPath: req.RelativePathOptional);
+        cfgSvc, logger, req.CarId, req.TrackId, req.FileName, req.SetupText,
+        overwrite: true, relPath: req.RelativePathOptional, versioned: req.Versioned);
 });
 
 // ── POST /api/setup/save ──────────────────────────────────────────────────────
 app.MapPost("/api/setup/save", async (
     HttpContext ctx,
     AgentConfigService cfgSvc,
+    ILogger<Program> logger,
     [FromBody] SetupSaveRequest req) =>
 {
     if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
     return await ExecuteSetupSave(
-        cfgSvc, req.CarId, req.TrackId, req.FileName, req.SetupText,
-        req.Overwrite, relPath: null);
+        cfgSvc, logger, req.CarId, req.TrackId, req.FileName, req.SetupText,
+        req.Overwrite, relPath: null, versioned: req.Versioned);
 });
 
 // ══ Admin endpoints (all require localhost guard + token) ══════════════════
@@ -856,8 +858,9 @@ static string NextVersionedFileName(string dir, string baseName)
 
 static async Task<IResult> ExecuteSetupSave(
     AgentConfigService cfgSvc,
+    ILogger logger,
     string? carId, string? trackId, string? fileName, string? setupText,
-    bool overwrite, string? relPath)
+    bool overwrite, string? relPath, bool versioned = false)
 {
     if (string.IsNullOrWhiteSpace(carId)    ||
         string.IsNullOrWhiteSpace(trackId)  ||
@@ -892,6 +895,16 @@ static async Task<IResult> ExecuteSetupSave(
         var safeTrackId = SanitiseSegment(trackId);
         if (safeCarId is null || safeTrackId is null)
             return Results.BadRequest(new { error = "Invalid carId or trackId." });
+
+        // When versioned, generate an AI-stamped filename and never overwrite the original.
+        if (versioned)
+        {
+            var baseName  = Path.GetFileNameWithoutExtension(safeFileName);
+            var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+            safeFileName  = $"{baseName}__AI_{timestamp}.ini";
+            overwrite     = false;
+        }
+
         var dir = Path.Combine(root, safeCarId, safeTrackId);
         savedPath = Path.Combine(dir, safeFileName);
         if (!Path.GetFullPath(savedPath).StartsWith(
@@ -900,14 +913,27 @@ static async Task<IResult> ExecuteSetupSave(
             return Results.BadRequest(new { error = "Resolved path escapes setup directory." });
     }
 
+    logger.LogInformation(
+        "SAVE REQ car={Car} track={Track} file={File} versioned={Versioned} bytes={Bytes}",
+        carId, trackId, safeFileName, versioned, setupText.Length);
+
     if (!overwrite && File.Exists(savedPath))
         return Results.Conflict(new { error = "File already exists. Set overwrite=true to replace." });
 
-    Directory.CreateDirectory(Path.GetDirectoryName(savedPath)!);
-    var tmp = savedPath + ".tmp";
-    await File.WriteAllTextAsync(tmp, setupText);
-    File.Move(tmp, savedPath, overwrite: true);
-    return Results.Ok(new { ok = true, savedPath });
+    try
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(savedPath)!);
+        var tmp = savedPath + ".tmp";
+        await File.WriteAllTextAsync(tmp, setupText);
+        File.Move(tmp, savedPath, overwrite: true);
+        logger.LogInformation("SAVE OK path={Path}", savedPath);
+        return Results.Ok(new { ok = true, savedFileName = safeFileName, fullPath = savedPath });
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "SAVE ERR");
+        return Results.Problem(ex.Message);
+    }
 }
 
 // ── Request models ────────────────────────────────────────────────────────────
@@ -916,14 +942,16 @@ record SetupApplyRequest(
     string? TrackId,
     string? FileName,
     string? SetupText,
-    string? RelativePathOptional);
+    string? RelativePathOptional,
+    bool    Versioned = false);
 
 record SetupSaveRequest(
     string? CarId,
     string? TrackId,
     string? FileName,
     string? SetupText,
-    bool    Overwrite = true);
+    bool    Overwrite = true,
+    bool    Versioned = false);
 
 record ReferenceRootSetRequest(string? Path);
 
