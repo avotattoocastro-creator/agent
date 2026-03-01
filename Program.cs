@@ -148,7 +148,7 @@ app.MapGet("/api/info", (WebSocketHub hub, AcSharedMemoryReader reader) =>
 app.MapGet("/api/public/auth-info", () =>
     Results.Ok(new { tokenRequired = true }));
 
-// ── POST /api/setup/apply  (kept for backward compatibility) ─────────────────
+// ── POST /api/setup/apply ─────────────────────────────────────────────────────
 app.MapPost("/api/setup/apply", async (
     HttpContext ctx,
     AgentConfigService cfgSvc,
@@ -156,9 +156,67 @@ app.MapPost("/api/setup/apply", async (
     [FromBody] SetupApplyRequest req) =>
 {
     if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
-    return await ExecuteSetupSave(
-        cfgSvc, logger, req.CarId, req.TrackId, req.FileName, req.SetupText,
-        overwrite: true, relPath: req.RelativePathOptional, versioned: req.Versioned);
+
+    if (string.IsNullOrWhiteSpace(req.Car)        ||
+        string.IsNullOrWhiteSpace(req.Track)      ||
+        string.IsNullOrWhiteSpace(req.File)       ||
+        string.IsNullOrWhiteSpace(req.IniContent))
+        return Results.BadRequest(new { error = "car, track, file and iniContent are required." });
+
+    var safeCar   = SanitiseSegment(req.Car);
+    var safeTrack = SanitiseSegment(req.Track);
+    var safeFile  = SanitiseSegment(req.File);
+    if (safeCar is null || safeTrack is null || safeFile is null)
+        return Results.BadRequest(new { error = "Invalid car, track, or file name." });
+
+    // Prefer ReferenceRoot (same root as /api/reference/*), fall back to DefaultRoot.
+    var root = cfgSvc.Current.Setup.ReferenceRoot;
+    if (string.IsNullOrWhiteSpace(root))
+        root = cfgSvc.Current.Setup.DefaultRoot;
+    if (string.IsNullOrWhiteSpace(root))
+    {
+        var docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        root = Path.Combine(docs, "Assetto Corsa", "setups");
+    }
+
+    var tag = string.IsNullOrWhiteSpace(req.Tag) ? "AI" : req.Tag.Trim();
+    var safeTag = SanitiseSegment(tag) ?? "AI";
+    string savedFile;
+    if (req.Versioned)
+    {
+        var baseName = Path.GetFileNameWithoutExtension(safeFile);
+        var ts       = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+        savedFile    = $"{baseName}__{safeTag}_{ts}.ini";
+    }
+    else
+    {
+        savedFile = safeFile.EndsWith(".ini", StringComparison.OrdinalIgnoreCase)
+            ? safeFile : safeFile + ".ini";
+    }
+
+    var dir     = Path.Combine(root, safeCar, safeTrack);
+    var absPath = Path.GetFullPath(Path.Combine(dir, savedFile));
+    if (!absPath.StartsWith(Path.GetFullPath(root) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        return Results.BadRequest(new { error = "Resolved path escapes setup directory." });
+
+    logger.LogInformation(
+        "SAVE REQ car={Car} track={Track} file={File} versioned={Versioned} bytes={Bytes}",
+        req.Car, req.Track, savedFile, req.Versioned, req.IniContent.Length);
+
+    try
+    {
+        Directory.CreateDirectory(dir);
+        var tmp = absPath + ".tmp";
+        await File.WriteAllTextAsync(tmp, req.IniContent);
+        File.Move(tmp, absPath, overwrite: true);
+        logger.LogInformation("SAVE OK path={Path}", absPath);
+        return Results.Ok(new { ok = true, savedFile, path = absPath });
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "SAVE ERR");
+        return Results.Problem(ex.Message);
+    }
 });
 
 // ── POST /api/setup/save ──────────────────────────────────────────────────────
@@ -938,12 +996,12 @@ static async Task<IResult> ExecuteSetupSave(
 
 // ── Request models ────────────────────────────────────────────────────────────
 record SetupApplyRequest(
-    string? CarId,
-    string? TrackId,
-    string? FileName,
-    string? SetupText,
-    string? RelativePathOptional,
-    bool    Versioned = false);
+    string? Car,
+    string? Track,
+    string? File,
+    string? IniContent,
+    bool    Versioned = false,
+    string? Tag       = "AI");
 
 record SetupSaveRequest(
     string? CarId,
