@@ -318,7 +318,7 @@ app.MapPost("/api/admin/diagnostics/run", (
         setupFolder           = setupRoot,
         setupFolderExists     = setupExists,
         setupFolderWritable   = setupWritable,
-        tokenConfigured       = cfgSvc.Current.Token != "change-me",
+        tokenConfigured       = cfgSvc.Current.Token != "12345",
         machineName           = Environment.MachineName,
         localIps,
         httpPort              = cfgSvc.Current.Port,
