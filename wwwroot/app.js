@@ -208,7 +208,12 @@ async function saveConfig(e) {
     physicsHz:  +document.getElementById('cfg-physhz').value,
     graphicsHz: +document.getElementById('cfg-gfxhz').value,
     staticHz:   +document.getElementById('cfg-statichz').value,
-    setup: { defaultRoot: document.getElementById('cfg-setuproot').value },
+    setup: {
+      // Explicitly carry forward fields that are managed by other UI controls.
+      referenceRoot:    configCache?.setup?.referenceRoot    || '',
+      allowBrowseDialog: configCache?.setup?.allowBrowseDialog ?? true,
+      defaultRoot:      document.getElementById('cfg-setuproot').value,
+    },
   };
   const check = await api('POST', '/api/admin/restart-required-check', body);
   const r = await api('POST', '/api/admin/config', body);
@@ -299,6 +304,7 @@ function dot(on) {
   el.title = on ? 'Connected' : 'Disconnected';
 }
 function setText(id, v) { const e = document.getElementById(id); if (e) e.textContent = v; }
+function fmtHz(v) { return (v || 0).toFixed(1); }
 function fmtTimestamp(utcString) {
   if (!utcString) return '';
   return new Date(utcString).toISOString().replace('T', ' ').slice(0, 23);
@@ -374,11 +380,56 @@ document.addEventListener('keydown', e => {
   }
 });
 
+// ── Reference Setups Folder ───────────────────────────────────────────────────
+async function loadRefRoot() {
+  const r = await api('GET', '/api/admin/referenceRoot/get');
+  if (r._error) return;
+  document.getElementById('inp-refroot').value = r.path || '';
+  const msg = document.getElementById('refroot-counts');
+  if (msg) {
+    msg.textContent = r.configured
+      ? `✓ Configured — ${r.carsCount} car folder(s), ${r.totalCount} setup file(s) found`
+      : (r.path ? '⚠ Folder does not exist' : 'Not configured — enter a path and click Save');
+  }
+}
+
+async function refBrowse() {
+  const r = await api('POST', '/api/admin/referenceRoot/browse');
+  if (r._error) { toast('Browse error: ' + r._error); return; }
+  if (r.ok && r.path) {
+    document.getElementById('inp-refroot').value = r.path;
+    toast('Folder selected');
+  } else {
+    toast('Browse cancelled');
+  }
+}
+
+async function refSave() {
+  const path = document.getElementById('inp-refroot').value.trim();
+  const msg  = document.getElementById('refroot-msg');
+  const r    = await api('POST', '/api/admin/referenceRoot/set', { path });
+  if (r._error) {
+    msg.textContent = '✗ ' + (r._error || 'Save failed');
+    msg.className   = 'cfg-msg err';
+  } else {
+    msg.textContent = '✓ Saved';
+    msg.className   = 'cfg-msg ok';
+    await loadRefRoot();
+  }
+  setTimeout(() => { msg.textContent = ''; }, 4000);
+}
+
+async function refRescan() {
+  const r = await api('POST', '/api/admin/setup/reference/rescan');
+  if (r._error) { toast('Rescan error: ' + r._error); return; }
+  toast(`Rescan done — ${r.count} setup file(s)`);
+  await loadRefRoot();
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 (async function init() {
   await loadConfig();
-  await refreshState();
-  await refreshLogs();
+  await Promise.all([refreshState(), refreshLogs(), loadRefRoot()]);
   pollTimer = setInterval(refreshState, 2000);
   logTimer  = setInterval(refreshLogs,  5000);
 })();

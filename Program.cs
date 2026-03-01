@@ -37,6 +37,7 @@ builder.Services.AddSingleton<AcSharedMemoryReader>();
 builder.Services.AddSingleton<WebSocketHub>();
 builder.Services.AddSingleton<TelemetryService>();
 builder.Services.AddSingleton<WindowsAutostartService>();
+builder.Services.AddSingleton<SetupReferenceService>();
 builder.Services.AddHostedService<AgentRuntime>();
 builder.Services.AddHostedService<WatchdogService>();
 builder.Services.AddHostedService<AcProcessMonitor>();
@@ -114,61 +115,28 @@ app.MapGet("/api/info", (WebSocketHub hub, AcSharedMemoryReader reader) =>
     });
 });
 
-// ── POST /api/setup/apply ─────────────────────────────────────────────────
+// ── POST /api/setup/apply  (kept for backward compatibility) ─────────────────
 app.MapPost("/api/setup/apply", async (
     HttpContext ctx,
     AgentConfigService cfgSvc,
     [FromBody] SetupApplyRequest req) =>
 {
     if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    return await ExecuteSetupSave(
+        cfgSvc, req.CarId, req.TrackId, req.FileName, req.SetupText,
+        overwrite: true, relPath: req.RelativePathOptional);
+});
 
-    if (string.IsNullOrWhiteSpace(req.CarId)    ||
-        string.IsNullOrWhiteSpace(req.TrackId)  ||
-        string.IsNullOrWhiteSpace(req.FileName) ||
-        string.IsNullOrWhiteSpace(req.SetupText))
-        return Results.BadRequest(new { error = "carId, trackId, fileName and setupText are required." });
-
-    // Only .ini files allowed.
-    var safeFileName = SanitiseSegment(req.FileName);
-    if (safeFileName is null)
-        return Results.BadRequest(new { error = "Invalid fileName." });
-    if (!safeFileName.EndsWith(".ini", StringComparison.OrdinalIgnoreCase))
-        safeFileName += ".ini";
-
-    var root = cfgSvc.Current.Setup.DefaultRoot;
-    if (string.IsNullOrWhiteSpace(root))
-    {
-        var docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-        root = Path.Combine(docs, "Assetto Corsa", "setups");
-    }
-
-    string savedPath;
-    if (!string.IsNullOrWhiteSpace(req.RelativePathOptional))
-    {
-        var resolved = Path.GetFullPath(Path.Combine(root, req.RelativePathOptional));
-        if (!resolved.StartsWith(Path.GetFullPath(root) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            return Results.BadRequest(new { error = "Invalid relative path." });
-        savedPath = resolved;
-    }
-    else
-    {
-        var safeCarId   = SanitiseSegment(req.CarId);
-        var safeTrackId = SanitiseSegment(req.TrackId);
-        if (safeCarId is null || safeTrackId is null)
-            return Results.BadRequest(new { error = "Invalid carId or trackId." });
-        var dir = Path.Combine(root, safeCarId, safeTrackId);
-        savedPath = Path.Combine(dir, safeFileName);
-        if (!Path.GetFullPath(savedPath).StartsWith(Path.GetFullPath(root) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            return Results.BadRequest(new { error = "Resolved path escapes setup directory." });
-    }
-
-    Directory.CreateDirectory(Path.GetDirectoryName(savedPath)!);
-    // Atomic write: write to .tmp then replace.
-    var tmp = savedPath + ".tmp";
-    await File.WriteAllTextAsync(tmp, req.SetupText);
-    File.Move(tmp, savedPath, overwrite: true);
-
-    return Results.Ok(new { ok = true, savedPath });
+// ── POST /api/setup/save ──────────────────────────────────────────────────────
+app.MapPost("/api/setup/save", async (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    [FromBody] SetupSaveRequest req) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    return await ExecuteSetupSave(
+        cfgSvc, req.CarId, req.TrackId, req.FileName, req.SetupText,
+        req.Overwrite, relPath: null);
 });
 
 // ══ Admin endpoints (all require localhost guard + token) ══════════════════
@@ -407,7 +375,233 @@ app.MapPost("/api/admin/open-folder", (
     return Results.Ok(new { ok = true, folder });
 });
 
-// ── Dashboard root redirect ───────────────────────────────────────────────
+// ══ Reference Root admin endpoints (localhost + token) ═══════════════════════
+
+// ── POST /api/admin/referenceRoot/browse ──────────────────────────────────────
+app.MapPost("/api/admin/referenceRoot/browse", (
+    HttpContext ctx,
+    AgentConfigService cfgSvc) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    if (!IsLocal(ctx))         return Results.Forbid();
+
+    if (!cfgSvc.Current.Setup.AllowBrowseDialog)
+        return Results.BadRequest(new
+        {
+            error = "Browse dialog is disabled. Set ReferenceRoot manually via the /set endpoint.",
+        });
+
+    try
+    {
+        var picked = ShowFolderDialog();
+        return picked is null
+            ? Results.Ok(new { ok = false, path = (string?)null })
+            : Results.Ok(new { ok = true,  path = picked });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new
+        {
+            error = $"Dialog unavailable (headless?). Set path manually. Detail: {ex.Message}",
+        });
+    }
+});
+
+// ── POST /api/admin/referenceRoot/set ─────────────────────────────────────────
+app.MapPost("/api/admin/referenceRoot/set", async (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    SetupReferenceService refSvc,
+    [FromBody] ReferenceRootSetRequest req) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+
+    if (string.IsNullOrWhiteSpace(req.Path))
+        return Results.BadRequest(new { error = "path is required." });
+
+    if (!Directory.Exists(req.Path))
+        return Results.BadRequest(new { error = "Folder does not exist." });
+
+    var updated = cfgSvc.Current;
+    // Replace the setup section in-place via a new SetupSection instance.
+    updated.Setup = new SetupSection
+    {
+        DefaultRoot      = cfgSvc.Current.Setup.DefaultRoot,
+        ReferenceRoot    = req.Path,
+        AllowBrowseDialog = cfgSvc.Current.Setup.AllowBrowseDialog,
+    };
+    await cfgSvc.SaveAsync(updated);
+    refSvc.Rescan();
+    return Results.Ok(new { ok = true, path = req.Path });
+});
+
+// ── GET /api/admin/referenceRoot/get ──────────────────────────────────────────
+app.MapGet("/api/admin/referenceRoot/get", (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    SetupReferenceService refSvc) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    var path = cfgSvc.Current.Setup.ReferenceRoot;
+    return Results.Ok(new
+    {
+        ok         = true,
+        path,
+        configured = !string.IsNullOrWhiteSpace(path) && Directory.Exists(path),
+        carsCount  = refSvc.CarsCount,
+        totalCount = refSvc.TotalCount,
+    });
+});
+
+// ── POST /api/admin/setup/reference/rescan ────────────────────────────────────
+app.MapPost("/api/admin/setup/reference/rescan", (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    SetupReferenceService refSvc) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    refSvc.Rescan();
+    return Results.Ok(new { ok = true, count = refSvc.TotalCount });
+});
+
+// ══ Public reference browsing endpoints (LAN allowed, token required) ════════
+
+// ── GET /api/reference/root ───────────────────────────────────────────────────
+app.MapGet("/api/reference/root", (
+    HttpContext ctx,
+    AgentConfigService cfgSvc) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    var path = cfgSvc.Current.Setup.ReferenceRoot;
+    return Results.Ok(new
+    {
+        ok         = true,
+        configured = !string.IsNullOrWhiteSpace(path) && Directory.Exists(path),
+        path,
+    });
+});
+
+// ── GET /api/reference/cars ───────────────────────────────────────────────────
+app.MapGet("/api/reference/cars", (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    SetupReferenceService refSvc) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    if (!IsRefRootConfigured(cfgSvc))
+        return Results.Ok(new { ok = true, cars = Array.Empty<string>() });
+
+    return Results.Ok(new { ok = true, cars = refSvc.GetCars() });
+});
+
+// ── GET /api/reference/tracks?car=CARFOLDER ───────────────────────────────────
+app.MapGet("/api/reference/tracks", (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    SetupReferenceService refSvc,
+    [FromQuery] string? car) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    if (string.IsNullOrWhiteSpace(car) || !IsValidRefSegment(car))
+        return Results.BadRequest(new { error = "Valid car parameter is required." });
+
+    return Results.Ok(new { ok = true, tracks = refSvc.GetTracks(car) });
+});
+
+// ── GET /api/reference/setups?car=CARFOLDER&track=TRACKFOLDER ────────────────
+app.MapGet("/api/reference/setups", (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    SetupReferenceService refSvc,
+    [FromQuery] string? car,
+    [FromQuery] string? track) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    if (string.IsNullOrWhiteSpace(car)   || !IsValidRefSegment(car))
+        return Results.BadRequest(new { error = "Valid car parameter is required." });
+    if (string.IsNullOrWhiteSpace(track) || !IsValidRefSegment(track))
+        return Results.BadRequest(new { error = "Valid track parameter is required." });
+
+    var items = refSvc.GetSetups(car, track);
+    return Results.Ok(new
+    {
+        ok     = true,
+        setups = items.Select(i => new
+        {
+            i.FileName, i.DisplayName, i.UpdatedUtc, i.SizeBytes,
+        }),
+    });
+});
+
+// ── GET /api/reference/setup/read?car=...&track=...&file=... ─────────────────
+app.MapGet("/api/reference/setup/read", async (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    [FromQuery] string? car,
+    [FromQuery] string? track,
+    [FromQuery] string? file) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    if (string.IsNullOrWhiteSpace(car)   || !IsValidRefSegment(car))
+        return Results.BadRequest(new { error = "Valid car parameter is required." });
+    if (string.IsNullOrWhiteSpace(track) || !IsValidRefSegment(track))
+        return Results.BadRequest(new { error = "Valid track parameter is required." });
+    if (string.IsNullOrWhiteSpace(file)  || !IsValidRefIniFile(file))
+        return Results.BadRequest(new { error = "Valid .ini file name is required." });
+
+    var root = cfgSvc.Current.Setup.ReferenceRoot;
+    if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+        return Results.BadRequest(new { error = "ReferenceRoot is not configured." });
+
+    var absPath = SafeRefPath(root, car, track, file);
+    if (absPath is null || !File.Exists(absPath))
+        return Results.NotFound(new { error = "Setup file not found." });
+
+    var fi = new FileInfo(absPath);
+    if (fi.Length > 512 * 1024)
+        return Results.BadRequest(new { error = "File exceeds 512 KB limit." });
+
+    var text = await File.ReadAllTextAsync(absPath);
+    return Results.Ok(new { ok = true, fileName = file, setupText = text });
+});
+
+// ── GET /api/setups/reference/list?carId=...&trackId=... ─────────────────────
+app.MapGet("/api/setups/reference/list", (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    SetupReferenceService refSvc,
+    [FromQuery] string? carId   = null,
+    [FromQuery] string? trackId = null) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    var items = refSvc.GetAllItems(carId, trackId);
+    return Results.Ok(new { ok = true, items });
+});
+
+// ── GET /api/setups/reference/tree ────────────────────────────────────────────
+app.MapGet("/api/setups/reference/tree", (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    SetupReferenceService refSvc) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    var cars = refSvc.GetCars();
+    var tree = cars.Select(carId => new
+    {
+        carId,
+        tracks = refSvc.GetTracks(carId).Select(trackId => new
+        {
+            trackId,
+            files = refSvc.GetSetups(carId, trackId).Select(s => new
+            {
+                s.FileName, s.DisplayName, s.UpdatedUtc, s.SizeBytes,
+            }),
+        }),
+    });
+    return Results.Ok(new { ok = true, cars = tree });
+});
+
+
 app.MapGet("/", () => Results.Redirect("/index.html"));
 
 // ── Startup banner ────────────────────────────────────────────────────────
@@ -426,6 +620,10 @@ app.Lifetime.ApplicationStarted.Register(() =>
     Console.WriteLine($"  Ping       : http://localhost:{cfg.Port}/api/ping");
     Console.WriteLine($"  Info       : http://localhost:{cfg.Port}/api/info");
     Console.WriteLine($"  Setup      : POST http://localhost:{cfg.Port}/api/setup/apply");
+    Console.WriteLine($"  Setup Save : POST http://localhost:{cfg.Port}/api/setup/save");
+    Console.WriteLine($"  Ref Root   : GET  http://localhost:{cfg.Port}/api/reference/root");
+    Console.WriteLine($"  Ref Cars   : GET  http://localhost:{cfg.Port}/api/reference/cars");
+    Console.WriteLine($"  Ref Tree   : GET  http://localhost:{cfg.Port}/api/setups/reference/tree");
     Console.WriteLine($"  Admin      : http://localhost:{cfg.Port}/api/admin/state");
     Console.WriteLine($"  Metrics    : http://localhost:{cfg.Port}/api/admin/metrics");
     Console.WriteLine($"  Logs       : http://localhost:{cfg.Port}/api/admin/logs");
@@ -499,6 +697,148 @@ static bool IsDirectoryWritable(string dir)
     catch { return false; }
 }
 
+// ── Reference-root security helpers ──────────────────────────────────────────
+
+/// <summary>
+/// Returns true when the segment is safe for use as a folder name component.
+/// Allows only [A-Za-z0-9 _-] — no path separators, no dots, no empty string.
+/// </summary>
+static bool IsValidRefSegment(string? s)
+{
+    if (string.IsNullOrWhiteSpace(s)) return false;
+    foreach (var c in s)
+        if (!char.IsLetterOrDigit(c) && c != ' ' && c != '_' && c != '-')
+            return false;
+    return true;
+}
+
+/// <summary>
+/// Returns true when the file name is a valid setup file.
+/// Base name must match [A-Za-z0-9 _-] and the extension must be .ini.
+/// </summary>
+static bool IsValidRefIniFile(string? s)
+{
+    if (string.IsNullOrWhiteSpace(s)) return false;
+    if (!s.EndsWith(".ini", StringComparison.OrdinalIgnoreCase)) return false;
+    var baseName = s[..^4];
+    if (baseName.Length == 0) return false;
+    foreach (var c in baseName)
+        if (!char.IsLetterOrDigit(c) && c != ' ' && c != '_' && c != '-')
+            return false;
+    return true;
+}
+
+/// <summary>
+/// Combines <paramref name="root"/> with the given segments and verifies the
+/// result is still inside <paramref name="root"/>. Returns null on traversal.
+/// </summary>
+static string? SafeRefPath(string root, params string[] segments)
+{
+    var combined = Path.Combine([root, .. segments]);
+    var resolved = Path.GetFullPath(combined);
+    var rootFull = Path.GetFullPath(root) + Path.DirectorySeparatorChar;
+    return resolved.StartsWith(rootFull, StringComparison.Ordinal) ? resolved : null;
+}
+
+static bool IsRefRootConfigured(AgentConfigService cfgSvc)
+{
+    var r = cfgSvc.Current.Setup.ReferenceRoot;
+    return !string.IsNullOrWhiteSpace(r) && Directory.Exists(r);
+}
+
+// ── Shared setup-save logic ───────────────────────────────────────────────────
+
+static async Task<IResult> ExecuteSetupSave(
+    AgentConfigService cfgSvc,
+    string? carId, string? trackId, string? fileName, string? setupText,
+    bool overwrite, string? relPath)
+{
+    if (string.IsNullOrWhiteSpace(carId)    ||
+        string.IsNullOrWhiteSpace(trackId)  ||
+        string.IsNullOrWhiteSpace(fileName) ||
+        string.IsNullOrWhiteSpace(setupText))
+        return Results.BadRequest(new { error = "carId, trackId, fileName and setupText are required." });
+
+    var safeFileName = SanitiseSegment(fileName);
+    if (safeFileName is null)
+        return Results.BadRequest(new { error = "Invalid fileName." });
+    if (!safeFileName.EndsWith(".ini", StringComparison.OrdinalIgnoreCase))
+        safeFileName += ".ini";
+
+    var root = cfgSvc.Current.Setup.DefaultRoot;
+    if (string.IsNullOrWhiteSpace(root))
+    {
+        var docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        root = Path.Combine(docs, "Assetto Corsa", "setups");
+    }
+
+    string savedPath;
+    if (!string.IsNullOrWhiteSpace(relPath))
+    {
+        var resolved = Path.GetFullPath(Path.Combine(root, relPath));
+        if (!resolved.StartsWith(Path.GetFullPath(root) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            return Results.BadRequest(new { error = "Invalid relative path." });
+        savedPath = resolved;
+    }
+    else
+    {
+        var safeCarId   = SanitiseSegment(carId);
+        var safeTrackId = SanitiseSegment(trackId);
+        if (safeCarId is null || safeTrackId is null)
+            return Results.BadRequest(new { error = "Invalid carId or trackId." });
+        var dir = Path.Combine(root, safeCarId, safeTrackId);
+        savedPath = Path.Combine(dir, safeFileName);
+        if (!Path.GetFullPath(savedPath).StartsWith(
+                Path.GetFullPath(root) + Path.DirectorySeparatorChar,
+                StringComparison.Ordinal))
+            return Results.BadRequest(new { error = "Resolved path escapes setup directory." });
+    }
+
+    if (!overwrite && File.Exists(savedPath))
+        return Results.Conflict(new { error = "File already exists. Set overwrite=true to replace." });
+
+    Directory.CreateDirectory(Path.GetDirectoryName(savedPath)!);
+    var tmp = savedPath + ".tmp";
+    await File.WriteAllTextAsync(tmp, setupText);
+    File.Move(tmp, savedPath, overwrite: true);
+    return Results.Ok(new { ok = true, savedPath });
+}
+
+// ── Windows folder-picker dialog (STA thread) ─────────────────────────────────
+
+/// <summary>
+/// Opens a FolderBrowserDialog on a dedicated STA thread and returns the
+/// selected path, or null if the user cancelled. Throws if no display is
+/// available (headless environment).
+/// </summary>
+static string? ShowFolderDialog()
+{
+    string?    result = null;
+    Exception? fault  = null;
+
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            using var dlg = new System.Windows.Forms.FolderBrowserDialog
+            {
+                Description            = "Select Reference Setups Folder",
+                UseDescriptionForTitle = true,
+                ShowNewFolderButton    = false,
+            };
+            if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                result = dlg.SelectedPath;
+        }
+        catch (Exception ex) { fault = ex; }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.Start();
+    thread.Join(TimeSpan.FromSeconds(30));
+
+    if (fault is not null) throw fault;
+    return result;
+}
+
 // ── Request models ────────────────────────────────────────────────────────────
 record SetupApplyRequest(
     string? CarId,
@@ -506,3 +846,12 @@ record SetupApplyRequest(
     string? FileName,
     string? SetupText,
     string? RelativePathOptional);
+
+record SetupSaveRequest(
+    string? CarId,
+    string? TrackId,
+    string? FileName,
+    string? SetupText,
+    bool    Overwrite = true);
+
+record ReferenceRootSetRequest(string? Path);
