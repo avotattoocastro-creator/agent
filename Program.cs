@@ -496,9 +496,9 @@ app.MapGet("/api/reference/cars", (
 {
     if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
     if (!IsRefRootConfigured(cfgSvc))
-        return Results.Ok(new { ok = true, cars = Array.Empty<string>() });
+        return Results.Ok(Array.Empty<string>());
 
-    return Results.Ok(new { ok = true, cars = refSvc.GetCars() });
+    return Results.Ok(refSvc.GetCars());
 });
 
 // ── GET /api/reference/tracks?car=CARFOLDER ───────────────────────────────────
@@ -512,7 +512,7 @@ app.MapGet("/api/reference/tracks", (
     if (string.IsNullOrWhiteSpace(car) || !IsValidRefSegment(car))
         return Results.BadRequest(new { error = "Valid car parameter is required." });
 
-    return Results.Ok(new { ok = true, tracks = refSvc.GetTracks(car) });
+    return Results.Ok(refSvc.GetTracks(car));
 });
 
 // ── GET /api/reference/setups?car=CARFOLDER&track=TRACKFOLDER ────────────────
@@ -530,14 +530,8 @@ app.MapGet("/api/reference/setups", (
         return Results.BadRequest(new { error = "Valid track parameter is required." });
 
     var items = refSvc.GetSetups(car, track);
-    return Results.Ok(new
-    {
-        ok     = true,
-        setups = items.Select(i => new
-        {
-            i.FileName, i.DisplayName, i.UpdatedUtc, i.SizeBytes,
-        }),
-    });
+    var fileNames = items.Select(i => i.FileName).OrderBy(x => x).ToList();
+    return Results.Ok(fileNames);
 });
 
 // ── GET /api/reference/setup/read?car=...&track=...&file=... ─────────────────
