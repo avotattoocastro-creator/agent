@@ -181,6 +181,66 @@
   </section>
 
 
+  <!-- ── Remote Setups card ───────────────────────────────────────────── -->
+  <section class="card full-width" id="card-remote">
+    <h2>🌐 Remote Setups <button class="btn-icon" onclick="toggleSection('remote-body')" title="Expand">▾</button></h2>
+    <div id="remote-body" style="display:none">
+      <div class="toggles" style="margin-bottom:10px">
+        <label class="toggle-row" title="Connect to a remote Agent instance and save setups there">
+          <span>Remote Mode</span>
+          <input type="checkbox" id="tog-remote" onchange="onRemoteModeChange()">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div class="form-grid">
+        <label>Host
+          <input id="rem-host" type="text" placeholder="192.168.1.10" oninput="saveRemoteConfig()">
+        </label>
+        <label>Port
+          <input id="rem-port" type="number" placeholder="8181" min="1" max="65535" oninput="saveRemoteConfig()">
+        </label>
+        <label>Token
+          <div class="inp-row">
+            <input id="rem-token" type="password" placeholder="API token" autocomplete="off" oninput="saveRemoteConfig()">
+            <button type="button" class="btn-icon" onclick="togglePwd('rem-token')">👁</button>
+          </div>
+        </label>
+      </div>
+      <div id="remote-controls" style="display:none">
+        <div class="form-grid" style="margin-top:10px">
+          <label>Car
+            <select id="rem-car" onchange="remoteLoadTracks()">
+              <option value="">— select car —</option>
+            </select>
+          </label>
+          <label>Track
+            <select id="rem-track" onchange="remoteLoadSetups()">
+              <option value="">— select track —</option>
+            </select>
+          </label>
+          <label>Setup File
+            <select id="rem-setup" onchange="remoteLoadContent()">
+              <option value="">— select setup —</option>
+            </select>
+          </label>
+        </div>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted);margin-top:10px">
+          INI Content
+          <textarea id="rem-content" rows="10" placeholder="Setup INI content…" spellcheck="false"
+            style="font-family:var(--mono);font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);padding:8px;resize:vertical;width:100%"></textarea>
+        </label>
+        <div class="form-actions" style="margin-top:8px">
+          <button class="btn btn-primary" onclick="remoteSaveSetup()">💾 Save Remote Setup</button>
+          <span id="rem-msg" class="cfg-msg"></span>
+        </div>
+        <div style="margin-top:10px">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Terminal</div>
+          <div id="rem-terminal" class="remote-terminal"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section class="card full-width" id="card-diag">
     <h2>🔍 Diagnostics <button class="btn-icon" onclick="toggleSection('diag-body')" title="Expand">▾</button></h2>
     <div id="diag-body" style="display:none">

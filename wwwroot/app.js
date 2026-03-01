@@ -474,6 +474,137 @@ async function refRescan() {
   await loadRefRoot();
 }
 
+// ── Remote Setups ─────────────────────────────────────────────────────────────
+const REM_KEY = 'avo_remote';
+
+function loadRemoteConfig() {
+  try {
+    const c = JSON.parse(localStorage.getItem(REM_KEY) || '{}');
+    document.getElementById('rem-host').value  = c.host  || '';
+    document.getElementById('rem-port').value  = c.port  || 8181;
+    document.getElementById('rem-token').value = c.token || '';
+    const en = !!c.enabled;
+    document.getElementById('tog-remote').checked = en;
+    document.getElementById('remote-controls').style.display = en ? '' : 'none';
+  } catch (_) {}
+}
+
+function saveRemoteConfig() {
+  const c = {
+    host:    document.getElementById('rem-host').value.trim(),
+    port:    document.getElementById('rem-port').value,
+    token:   document.getElementById('rem-token').value,
+    enabled: document.getElementById('tog-remote').checked,
+  };
+  localStorage.setItem(REM_KEY, JSON.stringify(c));
+}
+
+function onRemoteModeChange() {
+  saveRemoteConfig();
+  const en = document.getElementById('tog-remote').checked;
+  document.getElementById('remote-controls').style.display = en ? '' : 'none';
+  if (en) remoteLoadCars();
+}
+
+function remoteBase() {
+  const host = document.getElementById('rem-host').value.trim() || 'localhost';
+  const port = document.getElementById('rem-port').value || 8181;
+  return `http://${host}:${port}`;
+}
+
+function remoteToken() { return document.getElementById('rem-token').value; }
+
+async function remoteApi(method, path, body) {
+  const opts = {
+    method,
+    headers: { 'Content-Type': 'application/json', 'X-API-TOKEN': remoteToken() },
+  };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  try {
+    const r = await fetch(remoteBase() + path, opts);
+    if (r.status === 204) return {};
+    if (!r.ok) return { _error: await r.text(), _status: r.status };
+    return await r.json();
+  } catch (e) {
+    return { _error: e.message };
+  }
+}
+
+function remoteLog(msg) {
+  const el = document.getElementById('rem-terminal');
+  const ts = new Date().toISOString().replace('T', ' ').slice(0, 23);
+  const line = document.createElement('div');
+  line.className = 'remote-term-line';
+  line.textContent = `[${ts}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+async function remoteLoadCars() {
+  const r = await remoteApi('GET', '/api/reference/cars');
+  const sel = document.getElementById('rem-car');
+  sel.innerHTML = '<option value="">— select car —</option>';
+  if (!Array.isArray(r)) { remoteLog('Error loading cars: ' + (r._error || 'unknown')); return; }
+  r.forEach(c => { const o = document.createElement('option'); o.value = o.textContent = c; sel.appendChild(o); });
+}
+
+async function remoteLoadTracks() {
+  const car  = document.getElementById('rem-car').value;
+  const tSel = document.getElementById('rem-track');
+  const sSel = document.getElementById('rem-setup');
+  tSel.innerHTML = '<option value="">— select track —</option>';
+  sSel.innerHTML = '<option value="">— select setup —</option>';
+  document.getElementById('rem-content').value = '';
+  if (!car) return;
+  const r = await remoteApi('GET', `/api/reference/tracks?car=${encodeURIComponent(car)}`);
+  if (!Array.isArray(r)) { remoteLog('Error loading tracks: ' + (r._error || 'unknown')); return; }
+  r.forEach(t => { const o = document.createElement('option'); o.value = o.textContent = t; tSel.appendChild(o); });
+}
+
+async function remoteLoadSetups() {
+  const car   = document.getElementById('rem-car').value;
+  const track = document.getElementById('rem-track').value;
+  const sSel  = document.getElementById('rem-setup');
+  sSel.innerHTML = '<option value="">— select setup —</option>';
+  document.getElementById('rem-content').value = '';
+  if (!car || !track) return;
+  const r = await remoteApi('GET', `/api/reference/setups?car=${encodeURIComponent(car)}&track=${encodeURIComponent(track)}`);
+  if (!Array.isArray(r)) { remoteLog('Error loading setups: ' + (r._error || 'unknown')); return; }
+  r.forEach(f => { const o = document.createElement('option'); o.value = o.textContent = f; sSel.appendChild(o); });
+}
+
+async function remoteLoadContent() {
+  const car   = document.getElementById('rem-car').value;
+  const track = document.getElementById('rem-track').value;
+  const file  = document.getElementById('rem-setup').value;
+  if (!car || !track || !file) return;
+  const r = await remoteApi('GET', `/api/reference/setup/read?car=${encodeURIComponent(car)}&track=${encodeURIComponent(track)}&file=${encodeURIComponent(file)}`);
+  if (r._error) { remoteLog('Error loading setup content: ' + r._error); return; }
+  document.getElementById('rem-content').value = r.setupText || '';
+}
+
+async function remoteSaveSetup() {
+  const car          = document.getElementById('rem-car').value;
+  const track        = document.getElementById('rem-track').value;
+  const setupFile    = document.getElementById('rem-setup').value;
+  const content      = document.getElementById('rem-content').value;
+  const baseFileName = setupFile ? setupFile.replace(/\.(ini|json)$/i, '') : 'iter';
+  if (!car || !track)    { remoteLog('Error: car and track are required.'); return; }
+  if (!content.trim())   { remoteLog('Error: content is empty.'); return; }
+
+  const msg = document.getElementById('rem-msg');
+  const r = await remoteApi('POST', '/api/setups/save', { car, track, baseFileName, content });
+  if (r._error) {
+    remoteLog('Error saving: ' + (r._error || String(r._status)));
+    msg.textContent = '✗ Save failed'; msg.className = 'cfg-msg err';
+  } else {
+    remoteLog(`Saved remote setup: ${r.fileName}`);
+    msg.textContent = `✓ ${r.fileName}`; msg.className = 'cfg-msg ok';
+    await remoteLoadSetups();
+  }
+  setTimeout(() => { msg.textContent = ''; }, 5000);
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 (async function init() {
   // Check auth-info: show banner immediately if token is required but not stored.
@@ -484,6 +615,7 @@ async function refRescan() {
     }
   } catch (_) { /* non-critical */ }
 
+  loadRemoteConfig();
   await loadConfig();
   await Promise.all([refreshState(), refreshLogs(), loadRefRoot()]);
   pollTimer = setInterval(refreshState, 2000);

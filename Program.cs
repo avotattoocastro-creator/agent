@@ -48,6 +48,10 @@ builder.Services.AddHostedService<WatchdogService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<AcProcessMonitor>());
 builder.Services.AddHostedService<LanDiscoveryService>();
 
+// ── CORS (allow any origin – LAN tool, further guarded by token) ────────────
+builder.Services.AddCors(o => o.AddPolicy("public-api", p =>
+    p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
+
 // ── Kestrel ───────────────────────────────────────────────────────────────
 builder.WebHost.UseUrls($"http://0.0.0.0:{configSvc.Current.Port}");
 
@@ -55,6 +59,9 @@ var app = builder.Build();
 
 // ── Static files (wwwroot → dashboard) ───────────────────────────────────
 app.UseStaticFiles();
+
+// ── CORS ─────────────────────────────────────────────────────────────────
+app.UseCors("public-api");
 
 // ── WebSocket middleware ───────────────────────────────────────────────────
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
@@ -605,6 +612,57 @@ app.MapGet("/api/setups/reference/tree", (
 
 app.MapGet("/", () => Results.Redirect("/index.html"));
 
+// ── POST /api/setups/save ─────────────────────────────────────────────────────
+app.MapPost("/api/setups/save", async (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    SetupReferenceService refSvc,
+    [FromBody] SetupVersionedSaveRequest req) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+    if (string.IsNullOrWhiteSpace(req.Car)   || !IsValidRefSegment(req.Car))
+        return Results.BadRequest(new { error = "Valid car is required." });
+    if (string.IsNullOrWhiteSpace(req.Track) || !IsValidRefSegment(req.Track))
+        return Results.BadRequest(new { error = "Valid track is required." });
+    if (string.IsNullOrWhiteSpace(req.Content))
+        return Results.BadRequest(new { error = "content is required." });
+
+    var root = cfgSvc.Current.Setup.ReferenceRoot;
+    if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+        return Results.BadRequest(new { error = "ReferenceRoot is not configured." });
+
+    var baseName = string.IsNullOrWhiteSpace(req.BaseFileName) ? "iter" : req.BaseFileName.Trim();
+    if (!IsValidRefSegment(baseName))
+        return Results.BadRequest(new { error = "Invalid baseFileName." });
+
+    var safeCar   = SanitiseSegment(req.Car);
+    var safeTrack = SanitiseSegment(req.Track);
+    if (safeCar is null || safeTrack is null)
+        return Results.BadRequest(new { error = "Invalid car or track." });
+
+    var dir = Path.GetFullPath(Path.Combine(root, safeCar, safeTrack));
+    if (!dir.StartsWith(Path.GetFullPath(root) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        return Results.BadRequest(new { error = "Resolved path escapes reference root." });
+
+    Directory.CreateDirectory(dir);
+    var fileName = NextVersionedFileName(dir, baseName);
+    var absPath  = Path.Combine(dir, fileName);
+
+    try
+    {
+        var tmp = absPath + ".tmp";
+        await File.WriteAllTextAsync(tmp, req.Content);
+        File.Move(tmp, absPath, overwrite: false);
+    }
+    catch (IOException)
+    {
+        return Results.Conflict(new { error = "File already exists (concurrent write). Please retry." });
+    }
+
+    refSvc.Rescan();
+    return Results.Ok(new { ok = true, fileName });
+});
+
 // ── Startup banner ────────────────────────────────────────────────────────
 app.Lifetime.ApplicationStarted.Register(() =>
 {
@@ -622,6 +680,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
     Console.WriteLine($"  Info       : http://localhost:{cfg.Port}/api/info");
     Console.WriteLine($"  Setup      : POST http://localhost:{cfg.Port}/api/setup/apply");
     Console.WriteLine($"  Setup Save : POST http://localhost:{cfg.Port}/api/setup/save");
+    Console.WriteLine($"  Setup SaveV: POST http://localhost:{cfg.Port}/api/setups/save");
     Console.WriteLine($"  Ref Root   : GET  http://localhost:{cfg.Port}/api/reference/root");
     Console.WriteLine($"  Ref Cars   : GET  http://localhost:{cfg.Port}/api/reference/cars");
     Console.WriteLine($"  Ref Tree   : GET  http://localhost:{cfg.Port}/api/setups/reference/tree");
@@ -755,6 +814,23 @@ static bool IsRefRootConfigured(AgentConfigService cfgSvc)
     return !string.IsNullOrWhiteSpace(r) && Directory.Exists(r);
 }
 
+/// <summary>
+/// Returns a filename for <paramref name="baseName"/> that does not yet
+/// exist in <paramref name="dir"/>. Tries base.ini first, then
+/// base_v2.ini, base_v3.ini … up to 9999.
+/// </summary>
+static string NextVersionedFileName(string dir, string baseName)
+{
+    var candidate = baseName + ".ini";
+    if (!File.Exists(Path.Combine(dir, candidate))) return candidate;
+    for (int v = 2; v <= 9999; v++)
+    {
+        candidate = $"{baseName}_v{v}.ini";
+        if (!File.Exists(Path.Combine(dir, candidate))) return candidate;
+    }
+    return $"{baseName}_{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}.ini";
+}
+
 // ── Shared setup-save logic ───────────────────────────────────────────────────
 
 static async Task<IResult> ExecuteSetupSave(
@@ -829,6 +905,12 @@ record SetupSaveRequest(
     bool    Overwrite = true);
 
 record ReferenceRootSetRequest(string? Path);
+
+record SetupVersionedSaveRequest(
+    string? Car,
+    string? Track,
+    string? BaseFileName,
+    string? Content);
 
 /// <summary>
 /// Caches the machine's own unicast IP addresses, refreshed every 30 seconds.
