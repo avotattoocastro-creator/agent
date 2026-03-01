@@ -707,24 +707,30 @@ app.MapPost("/api/reference/setup/apply", async (
     if (req.Changes is null || req.Changes.Count == 0)
         return Results.BadRequest(new { error = "At least one change is required." });
 
-    // ── Agent / Shared Memory state diagnostics (informational, not blocking) ─
+    // ── Determine live-apply eligibility (informational, save is never blocked) ─
+    string? liveApplyReason = null;
     if (!runtime.IsRunning)
     {
+        liveApplyReason = "Agent not running";
         logBuf.Add(LogLevel.Warning, "WebUI",
             "APPLY WARNING: Agent not running — setup will still be written to disk.");
     }
-    if (!runtime.AcConnected)
+    else if (!runtime.AcConnected)
     {
+        liveApplyReason = "Shared Memory not connected";
         logBuf.Add(LogLevel.Warning, "WebUI",
             "APPLY WARNING: Shared Memory not connected — cannot verify active car.");
     }
-    // Car mismatch check — warn but do not block (file-based apply is offline-capable).
-    var activeCar = runtime.CarId;
-    if (!string.IsNullOrWhiteSpace(activeCar) &&
-        !activeCar.Equals(req.Car, StringComparison.OrdinalIgnoreCase))
+    else
     {
-        logBuf.Add(LogLevel.Warning, "WebUI",
-            $"APPLY WARNING: Car mismatch — requested '{req.Car}' but active car is '{activeCar}'.");
+        var activeCar = runtime.CarId;
+        if (!string.IsNullOrWhiteSpace(activeCar) &&
+            !activeCar.Equals(req.Car, StringComparison.OrdinalIgnoreCase))
+        {
+            liveApplyReason = "Car mismatch";
+            logBuf.Add(LogLevel.Warning, "WebUI",
+                $"APPLY WARNING: Car mismatch — requested '{req.Car}' but active car is '{activeCar}'.");
+        }
     }
 
     var root = cfgSvc.Current.Setup.ReferenceRoot;
@@ -830,14 +836,14 @@ app.MapPost("/api/reference/setup/apply", async (
 
         logger.LogInformation("SAVE OK path={Path}", absPath);
         logBuf.Add(LogLevel.Information, "WebUI", $"APPLY OK savedFile={savedFile} path={absPath}");
-        return Results.Ok(new { ok = true, savedFile, path = absPath, wroteVersioned = req.CreateVersionedCopy, diff });
+        return Results.Ok(new { savedOk = true, savedFile, path = absPath, appliedOk = liveApplyReason is null, reason = liveApplyReason, diff });
     }
     catch (Exception ex)
     {
         logger.LogError(ex, "SAVE ERR ex={Message}", ex.Message);
         logBuf.Add(LogLevel.Error, "WebUI",
             $"APPLY FAIL: {ex.GetType().Name}: {ex.Message}");
-        return Results.Ok(new { ok = false, error = ex.GetType().Name, details = ex.Message });
+        return Results.Ok(new { savedOk = false, error = ex.GetType().Name, details = ex.Message });
     }
 });
 

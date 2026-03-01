@@ -789,13 +789,14 @@ async function aiApply() {
     reason:             document.getElementById('ai-reason').value.trim() || 'AI',
   };
   const r = await remoteApi('POST', '/api/reference/setup/apply', body);
-  if (r._error || !r.ok) {
+  if (r._error || !r.savedOk) {
     const msg = r._error || (r.error && r.details ? `${r.error}: ${r.details}` : (r.error || 'Apply failed'));
     status.textContent = '✗ ' + msg; status.className = 'cfg-msg err';
     remoteLog('AI: Apply FAILED: ' + (r._error || JSON.stringify(r)));
     btn.disabled = false; return;
   }
-  status.textContent = `✓ Guardado en disco: ${r.savedFile}`; status.className = 'cfg-msg ok';
+  const liveNote = r.appliedOk ? '' : ` (${r.reason || 'not applied live'})`;
+  status.textContent = `✓ Guardado en disco: ${r.savedFile}${liveNote}`; status.className = 'cfg-msg ok';
   const badge = document.getElementById('ai-applied-badge');
   badge.style.display = '';
   badge.innerHTML = `Guardado en disco → <strong>${escHtml(r.savedFile)}</strong><br><span class="muted small">${escHtml(r.path || '')}</span>`;
