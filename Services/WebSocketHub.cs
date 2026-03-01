@@ -24,7 +24,7 @@ public sealed class WebSocketHub : IDisposable
 
     private readonly ConcurrentDictionary<Guid, ClientEntry> _clients = new();
     private readonly MetricsHub _metrics;
-    private readonly Timer _heartbeat;
+    private readonly System.Threading.Timer _heartbeat;
     private volatile TelemetryFrame? _lastFrame;
     private long _seq;
 
@@ -39,7 +39,7 @@ public sealed class WebSocketHub : IDisposable
     public WebSocketHub(MetricsHub metrics)
     {
         _metrics   = metrics;
-        _heartbeat = new Timer(OnHeartbeat, null,
+        _heartbeat = new System.Threading.Timer(OnHeartbeat, null,
             TimeSpan.FromSeconds(1),
             TimeSpan.FromSeconds(1));
     }
