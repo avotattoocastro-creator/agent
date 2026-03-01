@@ -22,6 +22,14 @@ public sealed class LogBuffer : ILoggerProvider
     private int  _count = 0;
     private readonly object _lock = new();
 
+    // ── Live-stream hook ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Raised for every new entry, outside the internal lock.
+    /// Subscribers must be fast and non-blocking.
+    /// </summary>
+    public event Action<LogEntry>? OnEntry;
+
     // ── Write ──────────────────────────────────────────────────────────────────
 
     public void Add(LogLevel level, string category, string message)
@@ -33,6 +41,8 @@ public sealed class LogBuffer : ILoggerProvider
             _head        = (_head + 1) % Capacity;
             if (_count < Capacity) _count++;
         }
+        // Fire outside the lock so subscribers cannot deadlock on re-entry.
+        OnEntry?.Invoke(entry);
     }
 
     public void Clear()

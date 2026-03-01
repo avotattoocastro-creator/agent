@@ -43,6 +43,7 @@ builder.Services.AddSingleton<WindowsAutostartService>();
 builder.Services.AddSingleton<AgentRuntime>();
 builder.Services.AddSingleton<AcProcessMonitor>();
 builder.Services.AddSingleton<SetupReferenceService>();
+builder.Services.AddSingleton<LogWebSocketStreamer>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<AgentRuntime>());
 builder.Services.AddHostedService<WatchdogService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<AcProcessMonitor>());
@@ -102,6 +103,26 @@ app.Map("/ws", async (HttpContext ctx, WebSocketHub hub, AgentConfigService cfgS
     }
     using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
     await hub.HandleClientAsync(ws, ctx.RequestAborted);
+});
+
+// ── /ws/logs ──────────────────────────────────────────────────────────────
+app.Map("/ws/logs", async (HttpContext ctx, LogWebSocketStreamer logs, AgentConfigService cfgSvc) =>
+{
+    if (!ctx.WebSockets.IsWebSocketRequest)
+    {
+        ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+        await ctx.Response.WriteAsync("WebSocket upgrade required.");
+        return;
+    }
+    if (!TokenOk(ctx, cfgSvc))
+    {
+        ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await ctx.Response.WriteAsync("Unauthorized.");
+        return;
+    }
+    var tail = int.TryParse(ctx.Request.Query["tail"], out var t) ? Math.Clamp(t, 0, 2000) : 200;
+    using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
+    await logs.HandleAsync(ws, ctx.RequestAborted, tail);
 });
 
 // ── GET /api/ping ─────────────────────────────────────────────────────────
@@ -676,6 +697,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
     Console.ResetColor();
     Console.WriteLine($"  Dashboard  : http://localhost:{cfg.Port}");
     Console.WriteLine($"  WebSocket  : ws://localhost:{cfg.Port}/ws?token=***");
+    Console.WriteLine($"  Log Stream : ws://localhost:{cfg.Port}/ws/logs?token=***");
     Console.WriteLine($"  Ping       : http://localhost:{cfg.Port}/api/ping");
     Console.WriteLine($"  Info       : http://localhost:{cfg.Port}/api/info");
     Console.WriteLine($"  Setup      : POST http://localhost:{cfg.Port}/api/setup/apply");
