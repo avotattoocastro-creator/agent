@@ -8,6 +8,8 @@
     <AssemblyName>AvoTelemetryAgent</AssemblyName>
     <RootNamespace>AvoTelemetryAgent</RootNamespace>
     <Platforms>x64</Platforms>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 
 </Project>
