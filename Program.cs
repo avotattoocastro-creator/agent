@@ -830,14 +830,14 @@ app.MapPost("/api/reference/setup/apply", async (
 
         logger.LogInformation("SAVE OK path={Path}", absPath);
         logBuf.Add(LogLevel.Information, "WebUI", $"APPLY OK savedFile={savedFile} path={absPath}");
-        return Results.Ok(new { ok = true, savedFile, path = absPath, diff });
+        return Results.Ok(new { ok = true, savedFile, path = absPath, wroteVersioned = req.CreateVersionedCopy, diff });
     }
     catch (Exception ex)
     {
         logger.LogError(ex, "SAVE ERR ex={Message}", ex.Message);
         logBuf.Add(LogLevel.Error, "WebUI",
             $"APPLY FAIL: {ex.GetType().Name}: {ex.Message}");
-        return Results.Problem(ex.Message);
+        return Results.Ok(new { ok = false, error = ex.GetType().Name, details = ex.Message });
     }
 });
 
