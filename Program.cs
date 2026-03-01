@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Reflection;
@@ -7,6 +8,7 @@ using System.Security.Cryptography;
 using System.Text;
 using AvoTelemetryAgent.Services;
 using AvoTelemetryAgent.SharedMemory;
+using AvoTelemetryAgent.UI;
 using Microsoft.AspNetCore.Mvc;
 
 // ── Log buffer (created before DI so the provider can be registered) ─────────
@@ -65,7 +67,7 @@ app.Use(async (ctx, next) =>
         var cfg = ctx.RequestServices.GetRequiredService<AgentConfigService>().Current;
         if (cfg.AdminUi.BindLocalhostOnly && !cfg.AdminUi.AllowRemote)
         {
-            if (!IsLocal(ctx))
+            if (!IsLocalOrSelf(ctx))
             {
                 ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
                 await ctx.Response.WriteAsync("Admin UI is restricted to localhost.");
@@ -115,6 +117,10 @@ app.MapGet("/api/info", (WebSocketHub hub, AcSharedMemoryReader reader) =>
         clients      = hub.ClientCount,
     });
 });
+
+// ── GET /api/public/auth-info ─────────────────────────────────────────────
+app.MapGet("/api/public/auth-info", () =>
+    Results.Ok(new { tokenRequired = true }));
 
 // ── POST /api/setup/apply  (kept for backward compatibility) ─────────────────
 app.MapPost("/api/setup/apply", async (
@@ -356,7 +362,7 @@ app.MapPost("/api/admin/open-folder", (
     [FromQuery] string which) =>
 {
     if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
-    if (!IsLocal(ctx)) return Results.Forbid();
+    if (!IsLocalOrSelf(ctx)) return Results.Forbid();
 
     var docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
     var folder = which switch
@@ -384,7 +390,7 @@ app.MapPost("/api/admin/referenceRoot/browse", (
     AgentConfigService cfgSvc) =>
 {
     if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
-    if (!IsLocal(ctx))         return Results.Forbid();
+    if (!IsLocalOrSelf(ctx))   return Results.Forbid();
 
     if (!cfgSvc.Current.Setup.AllowBrowseDialog)
         return Results.BadRequest(new
@@ -394,7 +400,7 @@ app.MapPost("/api/admin/referenceRoot/browse", (
 
     try
     {
-        var picked = ShowFolderDialog();
+        var picked = NativeFolderPicker.PickFolder("Select Reference Setups Folder");
         return picked is null
             ? Results.Ok(new { ok = false, path = (string?)null })
             : Results.Ok(new { ok = true,  path = picked });
@@ -645,7 +651,8 @@ static string AgentVersion()
 /// <summary>Constant-time token comparison using UTF-8 encoded bytes.</summary>
 static bool TokenOk(HttpContext ctx, AgentConfigService cfgSvc)
 {
-    var provided = ctx.Request.Headers["X-AVO-TOKEN"].FirstOrDefault()
+    var provided = ctx.Request.Headers["X-API-TOKEN"].FirstOrDefault()
+                ?? ctx.Request.Headers["X-AVO-TOKEN"].FirstOrDefault()
                 ?? ctx.Request.Query["token"].FirstOrDefault()
                 ?? string.Empty;
     var expected = cfgSvc.Current.Token;
@@ -666,10 +673,13 @@ static bool TokenOk(HttpContext ctx, AgentConfigService cfgSvc)
     return CryptographicOperations.FixedTimeEquals(a, b);
 }
 
-static bool IsLocal(HttpContext ctx)
+static bool IsLocalOrSelf(HttpContext ctx)
 {
     var ip = ctx.Connection.RemoteIpAddress;
-    return ip is null || IPAddress.IsLoopback(ip);
+    if (ip is null || IPAddress.IsLoopback(ip)) return true;
+    // Map IPv4-in-IPv6 (::ffff:x.x.x.x) to its plain IPv4 form for comparison.
+    var check = ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip;
+    return LocalAddressCache.Contains(check);
 }
 
 static bool IsAdminPath(PathString path)
@@ -805,41 +815,6 @@ static async Task<IResult> ExecuteSetupSave(
     return Results.Ok(new { ok = true, savedPath });
 }
 
-// ── Windows folder-picker dialog (STA thread) ─────────────────────────────────
-
-/// <summary>
-/// Opens a FolderBrowserDialog on a dedicated STA thread and returns the
-/// selected path, or null if the user cancelled. Throws if no display is
-/// available (headless environment).
-/// </summary>
-static string? ShowFolderDialog()
-{
-    string?    result = null;
-    Exception? fault  = null;
-
-    var thread = new Thread(() =>
-    {
-        try
-        {
-            using var dlg = new System.Windows.Forms.FolderBrowserDialog
-            {
-                Description            = "Select Reference Setups Folder",
-                UseDescriptionForTitle = true,
-                ShowNewFolderButton    = false,
-            };
-            if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
-                result = dlg.SelectedPath;
-        }
-        catch (Exception ex) { fault = ex; }
-    });
-    thread.SetApartmentState(ApartmentState.STA);
-    thread.Start();
-    thread.Join(TimeSpan.FromSeconds(30));
-
-    if (fault is not null) throw fault;
-    return result;
-}
-
 // ── Request models ────────────────────────────────────────────────────────────
 record SetupApplyRequest(
     string? CarId,
@@ -856,3 +831,29 @@ record SetupSaveRequest(
     bool    Overwrite = true);
 
 record ReferenceRootSetRequest(string? Path);
+
+/// <summary>
+/// Caches the machine's own unicast IP addresses, refreshed every 30 seconds.
+/// Avoids enumerating NICs on every admin request.
+/// </summary>
+static class LocalAddressCache
+{
+    private static HashSet<IPAddress> _cache = Build();
+    private static DateTime _builtAt = DateTime.UtcNow;
+    private static readonly TimeSpan Ttl = TimeSpan.FromSeconds(30);
+
+    public static bool Contains(IPAddress addr)
+    {
+        if (DateTime.UtcNow - _builtAt > Ttl)
+        {
+            _cache   = Build();
+            _builtAt = DateTime.UtcNow;
+        }
+        return _cache.Contains(addr);
+    }
+
+    private static HashSet<IPAddress> Build()
+        => new(NetworkInterface.GetAllNetworkInterfaces()
+            .SelectMany(n => n.GetIPProperties().UnicastAddresses)
+            .Select(u => u.Address.IsIPv4MappedToIPv6 ? u.Address.MapToIPv4() : u.Address));
+}
