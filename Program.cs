@@ -679,6 +679,7 @@ app.MapPost("/api/reference/setup/apply", async (
     HttpContext ctx,
     AgentConfigService cfgSvc,
     AgentRuntime runtime,
+    AcProcessMonitor monitor,
     LogBuffer logBuf,
     ILogger<Program> logger,
     [FromBody] ApplySetupRequestDto req) =>
@@ -694,7 +695,7 @@ app.MapPost("/api/reference/setup/apply", async (
         $"changes={req.Changes?.Count ?? 0} ({reqChangeSummary}) " +
         $"versioned={req.CreateVersionedCopy}");
     logBuf.Add(LogLevel.Information, "WebUI",
-        $"AGENT STATE isRunning={runtime.IsRunning} " +
+        $"AGENT STATE isRunning={runtime.IsRunning} acProcessRunning={monitor.AcProcessRunning} " +
         $"acConnected={runtime.AcConnected} " +
         $"activeCar={runtime.CarId} activeTrack={runtime.TrackId}");
 
@@ -709,17 +710,17 @@ app.MapPost("/api/reference/setup/apply", async (
 
     // ── Determine live-apply eligibility (informational, save is never blocked) ─
     string? liveApplyReason = null;
-    if (!runtime.IsRunning)
+    if (!monitor.AcProcessRunning)
     {
-        liveApplyReason = "Agent not running";
+        liveApplyReason = "Assetto Corsa not running";
         logBuf.Add(LogLevel.Warning, "WebUI",
-            "APPLY WARNING: Agent not running — setup will still be written to disk.");
+            "LIVE APPLY skipped: Assetto Corsa not running");
     }
     else if (!runtime.AcConnected)
     {
         liveApplyReason = "Shared Memory not connected";
         logBuf.Add(LogLevel.Warning, "WebUI",
-            "APPLY WARNING: Shared Memory not connected — cannot verify active car.");
+            "LIVE APPLY skipped: Shared Memory not connected");
     }
     else
     {
@@ -729,7 +730,7 @@ app.MapPost("/api/reference/setup/apply", async (
         {
             liveApplyReason = "Car mismatch";
             logBuf.Add(LogLevel.Warning, "WebUI",
-                $"APPLY WARNING: Car mismatch — requested '{req.Car}' but active car is '{activeCar}'.");
+                $"LIVE APPLY skipped: Car mismatch requested={req.Car} active={activeCar}");
         }
     }
 
@@ -836,6 +837,8 @@ app.MapPost("/api/reference/setup/apply", async (
 
         logger.LogInformation("SAVE OK path={Path}", absPath);
         logBuf.Add(LogLevel.Information, "WebUI", $"APPLY OK savedFile={savedFile} path={absPath}");
+        if (liveApplyReason is null)
+            logBuf.Add(LogLevel.Information, "WebUI", "LIVE APPLY succeeded");
         return Results.Ok(new { savedOk = true, savedFile, path = absPath, appliedOk = liveApplyReason is null, reason = liveApplyReason, diff });
     }
     catch (Exception ex)
