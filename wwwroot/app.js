@@ -23,7 +23,7 @@ document.getElementById('btn-show-token').addEventListener('click', () => {
 async function api(method, path, body) {
   const opts = {
     method,
-    headers: { 'Content-Type': 'application/json', 'X-AVO-TOKEN': getToken() },
+    headers: { 'Content-Type': 'application/json', 'X-API-TOKEN': getToken() },
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
   try {
@@ -476,6 +476,14 @@ async function refRescan() {
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 (async function init() {
+  // Check auth-info: show banner immediately if token is required but not stored.
+  try {
+    const info = await fetch(BASE + '/api/public/auth-info').then(r => r.json());
+    if (info.tokenRequired && !getToken()) {
+      showAuthWarning('⚠ Token required — paste your API token in the Token field above and reload the page.');
+    }
+  } catch (_) { /* non-critical */ }
+
   await loadConfig();
   await Promise.all([refreshState(), refreshLogs(), loadRefRoot()]);
   pollTimer = setInterval(refreshState, 2000);
