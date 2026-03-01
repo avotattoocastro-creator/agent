@@ -9,12 +9,12 @@ namespace AvoTelemetryAgent.Services;
 /// <summary>
 /// Manages all connected WebSocket clients.
 ///
-/// Each client gets a bounded channel with capacity 1 and DropOldest policy:
-/// if the client is slow, stale frames are silently dropped and only the
-/// latest frame is delivered.
+/// Each client gets a bounded channel (capacity 1, DropOldest) so slow clients
+/// never block the broadcast path and always receive the freshest frame.
 ///
-/// A heartbeat timer fires every second to push a status-only frame to every
-/// client even when Assetto Corsa is not running.
+/// A heartbeat fires every second; when the agent is stopped the delegate
+/// GetCurrentStatus supplies the appropriate status message without a circular
+/// dependency on AgentRuntime.
 /// </summary>
 public sealed class WebSocketHub : IDisposable
 {
@@ -23,14 +23,22 @@ public sealed class WebSocketHub : IDisposable
         WebSocket Socket);
 
     private readonly ConcurrentDictionary<Guid, ClientEntry> _clients = new();
+    private readonly MetricsHub _metrics;
     private readonly Timer _heartbeat;
     private volatile TelemetryFrame? _lastFrame;
     private long _seq;
 
+    /// <summary>
+    /// Set by AgentRuntime after construction; drives the heartbeat status
+    /// without creating a circular DI dependency.
+    /// </summary>
+    public Func<StatusDto>? GetCurrentStatus { get; set; }
+
     public int ClientCount => _clients.Count;
 
-    public WebSocketHub()
+    public WebSocketHub(MetricsHub metrics)
     {
+        _metrics   = metrics;
         _heartbeat = new Timer(OnHeartbeat, null,
             TimeSpan.FromSeconds(1),
             TimeSpan.FromSeconds(1));
@@ -48,13 +56,15 @@ public sealed class WebSocketHub : IDisposable
             });
 
         _clients[id] = new ClientEntry(channel, ws);
+        _metrics.RecordWsClients(_clients.Count);
         try
         {
-            await SendLoop(ws, channel, ct).ConfigureAwait(false);
+            await SendLoop(ws, channel, _metrics, ct).ConfigureAwait(false);
         }
         finally
         {
             _clients.TryRemove(id, out _);
+            _metrics.RecordWsClients(_clients.Count);
         }
     }
 
@@ -64,7 +74,12 @@ public sealed class WebSocketHub : IDisposable
     {
         _lastFrame = frame;
         foreach (var (_, entry) in _clients)
+        {
+            // With DropOldest and capacity 1: if the channel already has an
+            // unconsumed item it will be dropped (client is slow).
+            if (entry.Channel.Reader.Count >= 1) _metrics.RecordFrameDropped();
             entry.Channel.Writer.TryWrite(frame);
+        }
         await Task.CompletedTask.ConfigureAwait(false);
     }
 
@@ -72,8 +87,11 @@ public sealed class WebSocketHub : IDisposable
 
     private void OnHeartbeat(object? _)
     {
-        var last = _lastFrame;
-        // Always create a new frame so we don't mutate a shared reference.
+        var last   = _lastFrame;
+        var status = GetCurrentStatus?.Invoke()
+                  ?? last?.Status
+                  ?? new StatusDto { Connected = false, Message = "heartbeat" };
+
         var heartbeat = new TelemetryFrame
         {
             TUtc     = DateTime.UtcNow.ToString("O"),
@@ -83,7 +101,7 @@ public sealed class WebSocketHub : IDisposable
             Physics  = last?.Physics  ?? new PhysicsDto(),
             Graphics = last?.Graphics ?? new GraphicsDto(),
             Statics  = last?.Statics  ?? new StaticsDto(),
-            Status   = last?.Status   ?? new StatusDto { Connected = false, Message = "heartbeat" },
+            Status   = status,
         };
 
         foreach (var (_, entry) in _clients)
@@ -95,6 +113,7 @@ public sealed class WebSocketHub : IDisposable
     private static async Task SendLoop(
         WebSocket ws,
         System.Threading.Channels.Channel<TelemetryFrame> channel,
+        MetricsHub metrics,
         CancellationToken ct)
     {
         var opts = new JsonSerializerOptions
@@ -106,6 +125,7 @@ public sealed class WebSocketHub : IDisposable
         {
             if (ws.State != WebSocketState.Open) break;
 
+            var t0    = DateTime.UtcNow;
             var json  = JsonSerializer.Serialize(frame, opts);
             var bytes = Encoding.UTF8.GetBytes(json);
             await ws.SendAsync(
@@ -113,6 +133,8 @@ public sealed class WebSocketHub : IDisposable
                 WebSocketMessageType.Text,
                 endOfMessage: true,
                 ct).ConfigureAwait(false);
+
+            metrics.RecordFrameSent((DateTime.UtcNow - t0).TotalMilliseconds);
         }
     }
 

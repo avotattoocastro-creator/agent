@@ -1,64 +1,103 @@
 using AvoTelemetryAgent.Models;
 using AvoTelemetryAgent.SharedMemory;
-using Microsoft.Extensions.Options;
 
 namespace AvoTelemetryAgent.Services;
 
 /// <summary>
-/// Background service that reads Assetto Corsa shared memory at configured rates
-/// and publishes TelemetryFrames to the WebSocketHub.
-///
-/// - Physics loop : PhysicsHz  (default 60 Hz)
-/// - Graphics loop: GraphicsHz (default 20 Hz)
-/// - Static read  : every StaticIntervalMs AND whenever carModel/track changes
+/// Reads Assetto Corsa shared memory and broadcasts TelemetryFrames.
+/// No longer a BackgroundService; lifecycle is controlled by AgentRuntime.
 /// </summary>
-public sealed class TelemetryService : BackgroundService
+public sealed class TelemetryService : IDisposable
 {
-    private readonly AcSharedMemoryReader _reader;
-    private readonly WebSocketHub         _hub;
-    private readonly AgentOptions         _opts;
+    private readonly AcSharedMemoryReader  _reader;
+    private readonly WebSocketHub          _hub;
+    private readonly MetricsHub            _metrics;
     private readonly ILogger<TelemetryService> _log;
 
     private long _seq;
 
-    // Last-known static values used to detect changes.
-    private string _lastCarModel = string.Empty;
-    private string _lastTrack    = string.Empty;
+    // Cached static state (survives start/stop cycles).
+    private string          _lastCarModel  = string.Empty;
+    private string          _lastTrack     = string.Empty;
+    private SPageFileStatic _cachedStatic;
+    private string          _cachedCarId   = string.Empty;
+    private string          _cachedTrackId = string.Empty;
+    private DateTime        _nextStaticRead = DateTime.MinValue;
 
-    // Cached static data (re-read on change or timer).
-    private SPageFileStatic   _cachedStatic;
-    private string            _cachedCarId  = string.Empty;
-    private string            _cachedTrackId = string.Empty;
-    private DateTime          _nextStaticRead = DateTime.MinValue;
+    // Latest graphics (updated by graphics loop, read by physics loop).
+    private SPageFileGraphics _latestGraphics;
+
+    // Loop state.
+    private CancellationTokenSource? _cts;
+    private Task _loopTask = Task.CompletedTask;
+
+    // Hz tracking (exponential moving average).
+    private DateTime _lastPhysicsTick  = DateTime.UtcNow;
+    private DateTime _lastGraphicsTick = DateTime.UtcNow;
+    private double   _physicsHzEma;
+    private double   _graphicsHzEma;
+
+    // Hz EMA tuning: α=0.05 gives a smooth ~20-sample window.
+    private const double EmaAlpha         = 0.05;
+    private const double MaxTickElapsed   = 0.5; // sanity cap in seconds
+
+    // Exposed for watchdog / runtime.
+    public long     LastSeq        { get; private set; }
+    public DateTime LastFrameUtc   { get; private set; } = DateTime.MinValue;
+    public string   CarId          => _cachedCarId;
+    public string   TrackId        => _cachedTrackId;
 
     public TelemetryService(
         AcSharedMemoryReader reader,
-        WebSocketHub hub,
-        IOptions<AgentOptions> opts,
+        WebSocketHub         hub,
+        MetricsHub           metrics,
         ILogger<TelemetryService> log)
     {
-        _reader = reader;
-        _hub    = hub;
-        _opts   = opts.Value;
-        _log    = log;
+        _reader  = reader;
+        _hub     = hub;
+        _metrics = metrics;
+        _log     = log;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken ct)
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    public Task StartAsync(AgentConfig config, CancellationToken appCt)
     {
-        var physicsInterval  = TimeSpan.FromSeconds(1.0 / _opts.PhysicsHz);
-        var graphicsInterval = TimeSpan.FromSeconds(1.0 / _opts.GraphicsHz);
+        if (_cts is { IsCancellationRequested: false }) return Task.CompletedTask;
 
-        var physicsTimer  = new PeriodicTimer(physicsInterval);
-        var graphicsTimer = new PeriodicTimer(graphicsInterval);
+        _cts      = CancellationTokenSource.CreateLinkedTokenSource(appCt);
+        _loopTask = RunLoops(config, _cts.Token);
+        return Task.CompletedTask;
+    }
 
-        // Run physics and graphics loops concurrently.
-        var physicsTask  = RunPhysicsLoop(physicsTimer,  ct);
-        var graphicsTask = RunGraphicsLoop(graphicsTimer, ct);
+    public async Task StopAsync()
+    {
+        if (_cts is null) return;
+        _cts.Cancel();
+        try   { await _loopTask.ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
+        _cts.Dispose();
+        _cts = null;
+    }
+
+    public void Dispose() => _cts?.Dispose();
+
+    // ── Loops ─────────────────────────────────────────────────────────────────
+
+    private async Task RunLoops(AgentConfig config, CancellationToken ct)
+    {
+        var physicsInterval  = TimeSpan.FromSeconds(1.0 / Math.Max(1, config.PhysicsHz));
+        var graphicsInterval = TimeSpan.FromSeconds(1.0 / Math.Max(1, config.GraphicsHz));
+        var staticInterval   = TimeSpan.FromSeconds(1.0 / Math.Max(1, config.StaticHz));
+
+        using var physicsTimer  = new PeriodicTimer(physicsInterval);
+        using var graphicsTimer = new PeriodicTimer(graphicsInterval);
+
+        var physicsTask  = RunPhysicsLoop(physicsTimer, ct);
+        var graphicsTask = RunGraphicsLoop(graphicsTimer, staticInterval, ct);
 
         await Task.WhenAll(physicsTask, graphicsTask).ConfigureAwait(false);
     }
-
-    // ── Physics loop ──────────────────────────────────────────────────────────
 
     private async Task RunPhysicsLoop(PeriodicTimer timer, CancellationToken ct)
     {
@@ -66,14 +105,25 @@ public sealed class TelemetryService : BackgroundService
         {
             try
             {
-                bool connected = _reader.CheckConnected();
-                MaybeRefreshStatic();
+                _reader.CheckConnected();
+                var physics = _reader.ReadPhysics();
+                var frame   = BuildFrame(physics, _latestGraphics, _reader.IsConnected);
 
-                var physics  = _reader.ReadPhysics();
-                var graphics = _reader.ReadGraphics();
-
-                var frame = BuildFrame(physics, graphics, connected);
+                var t0 = DateTime.UtcNow;
                 await _hub.BroadcastAsync(frame, ct).ConfigureAwait(false);
+                _metrics.RecordFrameSent((DateTime.UtcNow - t0).TotalMilliseconds);
+
+                LastSeq      = frame.Seq;
+                LastFrameUtc = DateTime.UtcNow;
+
+                // Hz EMA (α = 0.05 for smooth display).
+                var now     = DateTime.UtcNow;
+                var elapsed = (now - _lastPhysicsTick).TotalSeconds;
+                _lastPhysicsTick = now;
+                if (elapsed is > 0 and < MaxTickElapsed)
+                    _physicsHzEma = _physicsHzEma * (1 - EmaAlpha) + (1.0 / elapsed) * EmaAlpha;
+
+                _metrics.RecordPhysicsHz(_physicsHzEma);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -82,18 +132,35 @@ public sealed class TelemetryService : BackgroundService
         }
     }
 
-    // ── Graphics loop (lower rate – updates graphics sub-object only) ─────────
-    // We keep a separate loop so graphics fields update at 20 Hz
-    // while physics refresh at 60 Hz.  Both publish full frames.
-
-    private async Task RunGraphicsLoop(PeriodicTimer timer, CancellationToken ct)
+    private async Task RunGraphicsLoop(
+        PeriodicTimer timer, TimeSpan staticInterval, CancellationToken ct)
     {
+        var nextStatic = DateTime.MinValue;
         while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
         {
-            // Graphics loop does nothing extra here; the physics loop already
-            // embeds the latest graphics read.  This stub is left for future use
-            // (e.g. graphics-only sub-frame broadcasts).
-            await Task.Yield();
+            try
+            {
+                _latestGraphics = _reader.ReadGraphics();
+
+                var now = DateTime.UtcNow;
+                if (now >= nextStatic)
+                {
+                    MaybeRefreshStatic();
+                    nextStatic = now.Add(staticInterval);
+                }
+
+                // Hz EMA.
+                var elapsed = (now - _lastGraphicsTick).TotalSeconds;
+                _lastGraphicsTick = now;
+                if (elapsed is > 0 and < MaxTickElapsed)
+                    _graphicsHzEma = _graphicsHzEma * (1 - EmaAlpha) + (1.0 / elapsed) * EmaAlpha;
+
+                _metrics.RecordGraphicsHz(_graphicsHzEma);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _log.LogWarning(ex, "Error in graphics loop");
+            }
         }
     }
 
@@ -101,14 +168,9 @@ public sealed class TelemetryService : BackgroundService
 
     private unsafe void MaybeRefreshStatic()
     {
-        var now = DateTime.UtcNow;
-        if (now < _nextStaticRead && _cachedCarId.Length > 0)
-            return;
+        _cachedStatic   = _reader.ReadStatic();
+        _nextStaticRead = DateTime.UtcNow;
 
-        _cachedStatic  = _reader.ReadStatic();
-        _nextStaticRead = now.AddMilliseconds(_opts.StaticIntervalMs);
-
-        // _cachedStatic is a heap field; pin it before accessing fixed buffers.
         string carModel, track;
         fixed (SPageFileStatic* s = &_cachedStatic)
         {
@@ -135,7 +197,6 @@ public sealed class TelemetryService : BackgroundService
     {
         var seq = Interlocked.Increment(ref _seq);
 
-        // phy is a local stack variable — already fixed; take address directly.
         SPageFilePhysics* p = &phy;
         float latG         = p->AccG[0];
         float longG        = p->AccG[2];
@@ -196,3 +257,4 @@ public sealed class TelemetryService : BackgroundService
         };
     }
 }
+
