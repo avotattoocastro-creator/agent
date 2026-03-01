@@ -652,6 +652,73 @@ app.MapGet("/api/reference/setup/read", async (
     return Results.Ok(new { ok = true, fileName = file, setupText = text });
 });
 
+// ── POST /api/reference/setup/apply ──────────────────────────────────────────
+app.MapPost("/api/reference/setup/apply", async (
+    HttpContext ctx,
+    AgentConfigService cfgSvc,
+    ILogger<Program> logger,
+    [FromBody] ApplySetupRequestDto req) =>
+{
+    if (!TokenOk(ctx, cfgSvc)) return Results.Unauthorized();
+
+    if (string.IsNullOrWhiteSpace(req.Car)      || !IsValidRefSegment(req.Car))
+        return Results.BadRequest(new { error = "Valid car is required." });
+    if (string.IsNullOrWhiteSpace(req.Track)    || !IsValidRefSegment(req.Track))
+        return Results.BadRequest(new { error = "Valid track is required." });
+    if (string.IsNullOrWhiteSpace(req.BaseFile) || !IsValidRefIniFile(req.BaseFile))
+        return Results.BadRequest(new { error = "Valid baseFile (.ini) is required." });
+    if (req.Changes is null || req.Changes.Count == 0)
+        return Results.BadRequest(new { error = "At least one change is required." });
+
+    var root = cfgSvc.Current.Setup.ReferenceRoot;
+    if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+        return Results.BadRequest(new { error = "ReferenceRoot is not configured." });
+
+    var baseFilePath = SafeRefPath(root, req.Car, req.Track, req.BaseFile);
+    if (baseFilePath is null || !File.Exists(baseFilePath))
+        return Results.NotFound(new { error = "Base setup file not found." });
+
+    // Determine saved file name.
+    string savedFile;
+    if (req.CreateVersionedCopy)
+    {
+        var tag      = string.IsNullOrWhiteSpace(req.Reason) ? "AI" : SanitiseSegment(req.Reason.Trim()) ?? "AI";
+        var baseName = Path.GetFileNameWithoutExtension(req.BaseFile);
+        var ts       = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+        savedFile    = $"{baseName}__{tag}_{ts}.ini";
+    }
+    else
+    {
+        savedFile = req.BaseFile;
+    }
+
+    var dir     = Path.Combine(root, req.Car, req.Track);
+    var absPath = SafeRefPath(root, req.Car, req.Track, savedFile);
+    if (absPath is null)
+        return Results.BadRequest(new { error = "Resolved path escapes reference root." });
+
+    logger.LogInformation(
+        "SAVE REQ car={Car} track={Track} file={File} versioned={Versioned} changes={Changes}",
+        req.Car, req.Track, savedFile, req.CreateVersionedCopy, req.Changes.Count);
+
+    try
+    {
+        var originalText = await File.ReadAllTextAsync(baseFilePath);
+        var patched      = PatchIni(originalText, req.Changes);
+        Directory.CreateDirectory(dir);
+        var tmp = absPath + ".tmp";
+        await File.WriteAllTextAsync(tmp, patched);
+        File.Move(tmp, absPath, overwrite: !req.CreateVersionedCopy);
+        logger.LogInformation("SAVE OK path={Path}", absPath);
+        return Results.Ok(new { ok = true, savedFile, path = absPath });
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "SAVE ERR ex={Message}", ex.Message);
+        return Results.Problem(ex.Message);
+    }
+});
+
 // ── GET /api/setups/reference/list?carId=...&trackId=... ─────────────────────
 app.MapGet("/api/setups/reference/list", (
     HttpContext ctx,
@@ -912,6 +979,72 @@ static string NextVersionedFileName(string dir, string baseName)
     return $"{baseName}_{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}.ini";
 }
 
+// ── INI patch helper ──────────────────────────────────────────────────────────
+/// <summary>
+/// Applies a list of Section/Key/Value changes to raw INI text.
+/// If a matching key is found in the right section it is updated in-place.
+/// If not found, the key is appended at the end of the section (or a new
+/// section + key is added at the end of the file).
+/// </summary>
+static string PatchIni(string original, IEnumerable<ApplySetupChangeDto> changes)
+{
+    var lines = new List<string>(original.Split('\n'));
+
+    foreach (var change in changes)
+    {
+        var sectionHeader = $"[{change.Section}]";
+        int sectionLine   = -1;
+
+        // Find section.
+        for (int i = 0; i < lines.Count; i++)
+        {
+            if (lines[i].TrimEnd().Equals(sectionHeader, StringComparison.OrdinalIgnoreCase))
+            {
+                sectionLine = i;
+                break;
+            }
+        }
+
+        if (sectionLine >= 0)
+        {
+            // Look for the key inside this section (stop at next section header).
+            bool found = false;
+            for (int i = sectionLine + 1; i < lines.Count; i++)
+            {
+                var trimmed = lines[i].TrimEnd();
+                if (trimmed.StartsWith('[')) break; // next section
+                var eqIdx = trimmed.IndexOf('=');
+                if (eqIdx < 0) continue;
+                var existingKey = trimmed[..eqIdx].Trim();
+                if (existingKey.Equals(change.Key, StringComparison.OrdinalIgnoreCase))
+                {
+                    lines[i] = $"{change.Key}={change.Value}";
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                // Append key at end of section (before next section or EOF).
+                int insertAt = sectionLine + 1;
+                while (insertAt < lines.Count && !lines[insertAt].TrimEnd().StartsWith('['))
+                    insertAt++;
+                lines.Insert(insertAt, $"{change.Key}={change.Value}");
+            }
+        }
+        else
+        {
+            // Section doesn't exist — add it at the end.
+            if (lines.Count > 0 && !string.IsNullOrWhiteSpace(lines[^1]))
+                lines.Add(string.Empty);
+            lines.Add(sectionHeader);
+            lines.Add($"{change.Key}={change.Value}");
+        }
+    }
+
+    return string.Join('\n', lines);
+}
+
 // ── Shared setup-save logic ───────────────────────────────────────────────────
 
 static async Task<IResult> ExecuteSetupSave(
@@ -995,6 +1128,16 @@ static async Task<IResult> ExecuteSetupSave(
 }
 
 // ── Request models ────────────────────────────────────────────────────────────
+record ApplySetupChangeDto(string Section, string Key, string Value);
+
+record ApplySetupRequestDto(
+    string?                    Car,
+    string?                    Track,
+    string?                    BaseFile,
+    List<ApplySetupChangeDto>? Changes,
+    bool                       CreateVersionedCopy = false,
+    string?                    Reason              = null);
+
 record SetupApplyRequest(
     string? Car,
     string? Track,
