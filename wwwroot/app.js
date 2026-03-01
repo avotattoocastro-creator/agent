@@ -905,7 +905,8 @@ function wsAppendLog(msg) {
   while (el.children.length > 500) el.removeChild(el.firstChild);
 }
 
-// ── Boot ──────────────────────────────────────────────────────────────────────(async function init() {
+// ── Boot ──────────────────────────────────────────────────────────────────────
+(async function init() {
   // Check auth-info: show banner immediately if token is required but not stored.
   try {
     const info = await fetch(BASE + '/api/public/auth-info').then(r => r.json());
